@@ -1,6 +1,8 @@
 ## Goal and observable behavior
 
-<!-- What changes for a user or downstream system? Link the issue or request. -->
+<!-- State the outcome, not just the implementation. For docs/maintenance, name the reader or operator benefit; note when runtime behavior is unchanged. Link an issue/request if relevant. -->
+**Goal (one sentence):**
+
 **Triggering condition / input:**
 
 **Before → after (observable behavior):**

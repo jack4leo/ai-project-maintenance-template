@@ -8,6 +8,8 @@ Read `AGENTS.md` first, then inspect this repository as an unfamiliar project. Y
 2. Inspect package/build manifests, CI workflows, test configuration, directory layout, executable entry points and a representative path through each important subsystem. Use repository history only to confirm behavior and recurring issues, not as a substitute for source.
 3. Identify actual supported languages/platforms, entry points, subsystem responsibilities and owners from code/config/tests. Build a source map with links. Do not infer boundaries from folder names alone.
 4. Derive formatting/lint/build/test commands from scripts, CI or documented maintainer instructions. Record command, working directory, prerequisites and scope. Run safe local checks only; never contact production or consume credentials without authorization.
+5. Where available, inspect sanitized examples of reporter inputs, real request shapes and on-disk formats, including missing and boundary values; compare them with test fixtures. Identify sibling entry points and platform/client variants that may need separate verification.
+6. If multiple implementations or routes exist for one capability, determine which one deployment or runtime actually selects and cite the code/configuration/test evidence. Record variant differences and parity gaps; if the choice is not provable, leave it `UNKNOWN` rather than guessing.
 
 ## Adapt project memory
 

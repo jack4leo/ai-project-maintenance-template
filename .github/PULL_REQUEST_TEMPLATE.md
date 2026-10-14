@@ -1,6 +1,12 @@
 ## Goal and observable behavior
 
 <!-- What changes for a user or downstream system? Link the issue or request. -->
+**Triggering condition / input:**
+
+**Before → after (observable behavior):**
+
+<!-- Confirm every part of the complete diff serves the stated goal; explain any necessary adjacent or incidental-looking changes. -->
+**Diff-to-goal scope check:**
 
 ## Affected subsystems and contracts
 

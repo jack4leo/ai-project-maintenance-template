@@ -21,6 +21,9 @@
 - CI 工作流与必需检查：`UNKNOWN`
 - 集成/真实环境验证：`UNKNOWN`（说明凭证、隔离和可运行的安全方式）
 - 已知不运行于 CI 的验证：`UNKNOWN`
+- 测试隔离策略（如临时 HOME/数据目录、凭证处理和临时资源清理）：`UNKNOWN`
+- 按平台/客户端划分的验证矩阵及未覆盖组合：`UNKNOWN`（只记录项目实际支持或受影响的维度）
+- 已知基线失败的调查 owner、记录渠道与处置约定：`UNKNOWN`
 
 ## 风险与权限边界
 
@@ -35,6 +38,7 @@
 
 - 每日复盘运行方式 / agent：`UNKNOWN`
 - 运行时间 / 时区：`UNKNOWN`
+- 并发/重叠运行、失败重试、超时/中断和部分写入恢复策略：`UNKNOWN`（按项目实际 scheduler 和存储机制查证）
 - 复盘记录归档位置：`docs/reviews/YYYY-MM-DD.md`（模板约定；项目可由维护者调整）
 - 最近完成复盘的 reviewed-through SHA：`UNKNOWN`（同时更新 `LESSONS.md` 顶部标记）
 - 最后复盘日期：`UNKNOWN`

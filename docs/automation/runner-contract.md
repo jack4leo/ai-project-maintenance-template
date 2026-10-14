@@ -8,6 +8,8 @@ The runner needs a repository checkout, project timezone, default branch, the la
 
 The run records both boundary SHAs and the time of collection. If the previous SHA is missing, not an ancestor of HEAD, the branch was rewritten, history is shallow, or the intended range cannot be proven complete, do not silently move the watermark: report the gap and ask for recovery instructions. Handle merge commits and amended/rebased history according to a project policy recorded in `project-profile.md`.
 
+The project profile must state the applicable policy for overlapping runs, failures/retries, timeout or interruption, and recovery from partial writes. Do not assume a scheduler, locking service, retry policy, or storage atomicity that the project has not selected and verified. Keep recovery behavior consistent with the watermark and archive guarantees above.
+
 ## Required behavior
 
 1. Run with the repository timezone. Acquire a single-run lock or otherwise prevent overlapping reviews from racing over `LESSONS.md` and the watermark.
@@ -22,4 +24,4 @@ Start read-only. Grant write access only to the project memory files and only af
 
 ## Successful result fields
 
-A successful run records: review date/timezone; `from` and `through` SHA; number of commits inspected; evidence sources checked; findings grouped as rework / should-not-merge-or-release / validation-gap / done-right; Lessons and standards files changed; unresolved questions; runner status. A no-finding day still records the range and `No new evidence-backed lesson`.
+A successful run records: review date/timezone; `from` and `through` SHA; number of commits inspected; evidence sources checked; findings grouped as rework / should-not-merge-or-release / validation-gap / done-right; Lessons and standards files changed; unresolved questions; runner status. Each finding and material conclusion must be traceable to the specific reviewed commit(s) and concrete evidence (for example, a source reference, test command/result, or CI run); record evidence locations/identifiers rather than copying large or sensitive payloads. A no-finding day still records the range and `No new evidence-backed lesson`.

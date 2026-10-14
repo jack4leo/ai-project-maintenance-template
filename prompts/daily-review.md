@@ -9,7 +9,9 @@ For each commit and its relevant context, look for:
 3. **Validation gap:** was a material path not tested, were tests misleading/flaky, or was a success claim unsupported? Cite the actual CI/test output or the missing gate.
 4. **Done right:** what specific test, isolation boundary, review habit or rollout avoided a known failure? Record evidence, not generic praise.
 
-Check later commits and the final current behavior before concluding an earlier change was wrong; a follow-up may already have repaired it. Search relevant tests, issues/PRs and CI results when available. Do not infer a cause from timing alone. If facts conflict, record an unresolved question rather than a verdict.
+Check later commits and the final current behavior before concluding an earlier change was wrong; trace rework to its final status and, when conditions allow, reproduce it through the surface and input used by the original reporter. Search relevant tests, issues/PRs and CI results when available. Do not infer a cause from timing alone. If facts conflict, record an unresolved question rather than a verdict.
+
+Identify failing checks that were already present on the main branch or review baseline. Investigate whether each is a real defect when evidence and safe access permit, and record what was checked and the conclusion (or the unresolved owner/action); do not automatically treat a pre-existing red check as proof that the new change passes or fails.
 
 Update `LESSONS.md` with concise, actionable, project-specific rules and evidence. Merge duplicate observations into one rule. Increment `Seen` only for a distinct completed review date; multiple commits or copies on the same date count once. A one-off lesson remains in Lessons. Only after the same lesson is independently evidenced on at least three different dates, promote a stable, generalizable rule into the project-specific section of `docs/code-standards.md`, retain dates and links, and mark its promotion in Lessons. A severe single event may justify a clearly labeled temporary protection proposal, not an unapproved permanent policy.
 

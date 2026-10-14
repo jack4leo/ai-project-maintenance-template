@@ -28,13 +28,13 @@ GitHub **Use this template** 创建的副本已包含文档、提示词和项目
 
 安装脚本需要 Bash、Git 和 Python 3（用于安全合并 JSON 设置）；GitHub Template 项目本身已带文件与 hook 配置。Windows 用户请在 WSL 或提供 Bash/Git/Python 的类 Unix 环境运行脚本。
 
-可用 `--target DIR` 指定目标根目录，或用 `--no-hooks` 只复制文件、不更改 agent 设置。目标目录必须已存在；启用钩子时，如果目标是 Git 仓库，必须是仓库根目录。
+可用 `--target DIR` 指定目标目录，或用 `--no-hooks` 只复制文件、不更改 agent 设置。目标目录必须已存在；默认启用钩子时，目标必须是 Git 仓库根目录。非 Git 目录会被拒绝；若只想安装文件，请显式使用 `--no-hooks`。
 
 ## 安装内容与覆盖规则
 
 安装器复制根目录的 `AGENTS.md`、`CLAUDE.md`、`LESSONS.md`、安装器本身、`.agent-maintenance/session-start.sh`、`.github/PULL_REQUEST_TEMPLATE.md`，以及 `docs/`（不含仅描述模板来源的 `docs/source-and-extraction.md`）和 `prompts/` 下的文件。不会用模板版 `README.md` 替换目标项目自己的 README。
 
-已存在且内容不同的目标文件一律保留，并在输出中列为冲突；脚本不会提供静默覆盖模式。Codex/Claude 的现有 JSON 设置会被保留，安装器仅向 `SessionStart` 数组追加一项。遇到无效 JSON 或结构冲突时，脚本停止修改该设置并报错，不会用空设置覆盖它。重复运行会识别已有的钩子，不重复添加。
+已存在且内容不同的目标文件一律保留，并在输出中列为冲突；脚本不会提供静默覆盖模式。若启用钩子时 `.agent-maintenance/session-start.sh` 已存在且内容不同，安装器会在复制或修改设置前报错退出，不注册任何启动钩子；解决文件冲突后可重试，或使用 `--no-hooks` 仅安装其他文件。Codex/Claude 的现有 JSON 设置会被保留，安装器仅向 `SessionStart` 数组追加一项。遇到无效 JSON 或结构冲突时，脚本停止修改该设置并报错，不会用空设置覆盖它。重复运行会识别已有的钩子，不重复添加。
 
 ## 启动钩子会做什么
 

@@ -94,6 +94,19 @@ while IFS= read -r -d '' source_path; do
 done < <(find "$SOURCE_DIR/docs" "$SOURCE_DIR/prompts" -type f \
   ! -path "$SOURCE_DIR/docs/source-and-extraction.md" -print0)
 
+# Never register hooks against a pre-existing project script with different
+# contents. Do this before copying files or changing either provider's settings.
+if [[ "$INSTALL_HOOKS" == 1 ]]; then
+  hook_script="$TARGET_DIR/.agent-maintenance/session-start.sh"
+  if [[ -e "$hook_script" || -L "$hook_script" ]]; then
+    if [[ ! -f "$hook_script" ]] || ! cmp -s "$SOURCE_DIR/.agent-maintenance/session-start.sh" "$hook_script"; then
+      echo "ERROR: existing .agent-maintenance/session-start.sh differs from the installer; it was preserved and no startup hooks were registered." >&2
+      echo "       Resolve the file conflict, or use --no-hooks for file-only installation." >&2
+      exit 3
+    fi
+  fi
+fi
+
 prompt_ready=0
 conflicts=()
 for relative_path in "${files[@]}"; do

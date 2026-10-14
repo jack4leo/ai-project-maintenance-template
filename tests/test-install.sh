@@ -79,4 +79,28 @@ for relative_path, command in expected.items():
     assert any(handler.get("command") == command for handler in handlers), relative_path
 PY
 
+# A script streamed through stdin has no BASH_SOURCE path. Simulate curl returning
+# a complete repository archive and verify pipe mode delegates to the normal installer.
+archive="$TMP_DIR/source.tar.gz"
+tar -czf "$archive" --exclude='./.git' -C "$REPO_ROOT" .
+mock_bin="$TMP_DIR/mock-bin"
+mkdir -p "$mock_bin"
+cat > "$mock_bin/curl" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+cat "$SELF_EVOLUTION_TEST_ARCHIVE"
+SH
+chmod +x "$mock_bin/curl"
+remote_target="$TMP_DIR/remote-target"
+mkdir -p "$remote_target"
+(
+  cd "$remote_target"
+  PATH="$mock_bin:$PATH" SELF_EVOLUTION_TEST_ARCHIVE="$archive" \
+    bash -c 'cat "$1" | bash -s -- --no-hooks' _ "$REPO_ROOT/install.sh"
+) > "$TMP_DIR/remote.log" 2>&1
+grep -Fq "Installation complete for: $remote_target" "$TMP_DIR/remote.log" \
+  || fail "pipe installer did not complete in the current target directory"
+[[ -f "$remote_target/prompts/bootstrap-project.md" ]] \
+  || fail "pipe installer did not install the bootstrap prompt"
+
 echo "PASS: installer conflict and target-mode regression tests"

@@ -1,6 +1,26 @@
 #!/usr/bin/env bash
 set -eo pipefail
 
+# A raw-GitHub pipe has no script directory, so fetch the full source tree before
+# delegating to the regular installer. Local checkout/template installs stay offline.
+if [[ -z "${BASH_SOURCE[0]:-}" ]]; then
+  command -v curl >/dev/null 2>&1 || { echo "ERROR: curl is required for pipe installation." >&2; exit 127; }
+  command -v tar >/dev/null 2>&1 || { echo "ERROR: tar is required for pipe installation." >&2; exit 127; }
+
+  source_dir="$(mktemp -d)"
+  trap 'rm -rf "$source_dir"' EXIT
+  echo "Downloading Self-Evolution Flywheel source archive..."
+  curl -fsSL "https://github.com/jack4leo/self-evolution-flywheel/archive/refs/heads/main.tar.gz" \
+    | tar -xz -C "$source_dir" --strip-components=1
+  [[ -f "$source_dir/install.sh" && -f "$source_dir/prompts/bootstrap-project.md" ]] || {
+    echo "ERROR: downloaded archive is missing installer files." >&2
+    exit 2
+  }
+
+  bash "$source_dir/install.sh" "$@"
+  exit $?
+fi
+
 usage() {
   cat <<'USAGE'
 Usage: ./install.sh [--target DIR] [--no-hooks] [--bootstrap codex|claude]

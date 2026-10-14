@@ -10,6 +10,24 @@ GitHub **Use this template** 创建的副本已包含文档、提示词和项目
 ./install.sh
 ```
 
+### 在目标项目中直接运行一行命令
+
+如果目标项目没有模板副本，也不想另外克隆模板仓库，可在**目标 Git 仓库根目录**运行：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/jack4leo/self-evolution-flywheel/main/install.sh | bash
+```
+
+管道模式会先下载 `main` 分支的完整源码归档到临时目录，再调用同一安装器；模板文件会安装到当前目录，默认注册 Codex 与 Claude Code 启动钩子。需要 Bash、Git、Python 3、curl 和 tar。此命令应在支持管道安装的改动合并到 `main` 后使用。`curl | bash` 会立即执行远程脚本，首次使用前请先检查 [install.sh](../install.sh)；Codex/Claude Code 仍可能要求用户信任项目设置。管道模式始终获取 `main` 归档；如需固定版本，请检出已审阅的提交 SHA 后运行该检出中的本地 `./install.sh`，不要只固定 raw 脚本 URL。
+
+若希望安装后立即启动 Codex Bootstrap（而不是只安装文件和钩子），运行：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/jack4leo/self-evolution-flywheel/main/install.sh | bash -s -- --bootstrap codex
+```
+
+不带 `--bootstrap` 时不会自动启动 agent 或修改项目源码；初始化会由后续启动钩子提示，或按下文使用本地安装器显式启动。目标目录须已存在，且启用钩子时必须是 Git 仓库根目录。
+
 如果模板仓库单独克隆在另一个目录：
 
 ```bash

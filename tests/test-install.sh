@@ -112,6 +112,158 @@ assert text.count(begin) == 1 and text.count(end) == 1, "managed block markers a
 assert text.endswith("\n" + before), "maintainer-owned AGENTS.md content was not preserved"
 PY
 
+# Updating a managed block must preserve the existing file owner, mode, and
+# extended attributes (including ACLs where the platform exposes them).
+metadata_target="$TMP_DIR/agents-metadata-target"
+mkdir -p "$metadata_target"
+printf '# Preserve file metadata\n' > "$metadata_target/AGENTS.md"
+python3 - "$metadata_target/AGENTS.md" "$TMP_DIR/metadata-expected.json" <<'PY'
+import errno
+import json
+import os
+import stat
+import struct
+import sys
+from pathlib import Path
+
+filename, expected_path = map(Path, sys.argv[1:])
+os.chmod(filename, 0o640)
+if os.geteuid() == 0:
+    os.chown(filename, 65534, 65534)
+xattr_supported = False
+try:
+    os.setxattr(filename, "user.self_evolution_test", b"preserve-me")
+    xattr_supported = True
+except OSError as exc:
+    if exc.errno not in {errno.EPERM, errno.ENOTSUP, errno.EOPNOTSUPP, errno.ENOSYS}:
+        raise
+named_user = 12345 if os.stat(filename).st_uid != 12345 else 12346
+acl = (
+    struct.pack("<I", 2)
+    + struct.pack("<HHI", 0x01, 0x06, 0xFFFFFFFF)
+    + struct.pack("<HHI", 0x02, 0x04, named_user)
+    + struct.pack("<HHI", 0x04, 0x04, 0xFFFFFFFF)
+    + struct.pack("<HHI", 0x10, 0x04, 0xFFFFFFFF)
+    + struct.pack("<HHI", 0x20, 0x00, 0xFFFFFFFF)
+)
+acl_supported = False
+try:
+    os.setxattr(filename, "system.posix_acl_access", acl)
+    acl_supported = True
+except OSError as exc:
+    if exc.errno not in {errno.EPERM, errno.ENOTSUP, errno.EOPNOTSUPP, errno.ENOSYS}:
+        raise
+result = os.stat(filename)
+expected_path.write_text(
+    json.dumps({
+        "uid": result.st_uid,
+        "gid": result.st_gid,
+        "mode": stat.S_IMODE(result.st_mode),
+        "xattr_supported": xattr_supported,
+        "acl_supported": acl_supported,
+        "acl_hex": acl.hex(),
+    }),
+    encoding="utf-8",
+)
+PY
+run_installer_in_pty "$REPO_ROOT/install.sh" "$metadata_target" y "$TMP_DIR/agents-metadata.log" \
+  || fail "confirming a managed AGENTS.md metadata update failed"
+python3 - "$metadata_target/AGENTS.md" "$TMP_DIR/metadata-expected.json" <<'PY'
+import json
+import os
+import stat
+import sys
+from pathlib import Path
+
+filename, expected_path = map(Path, sys.argv[1:])
+expected = json.loads(expected_path.read_text(encoding="utf-8"))
+actual = os.stat(filename)
+assert (actual.st_uid, actual.st_gid) == (expected["uid"], expected["gid"]), "AGENTS.md owner or group changed"
+assert stat.S_IMODE(actual.st_mode) == expected["mode"], "AGENTS.md permissions changed"
+if expected["xattr_supported"]:
+    assert os.getxattr(filename, "user.self_evolution_test") == b"preserve-me", "AGENTS.md extended attribute was lost"
+if expected["acl_supported"]:
+    assert os.getxattr(filename, "system.posix_acl_access") == bytes.fromhex(expected["acl_hex"]), "AGENTS.md ACL was lost or changed"
+PY
+
+# Atomic replacement cannot retain a file's hard-link relationship, so decline it.
+agents_hardlink_target="$TMP_DIR/agents-hardlink-target"
+mkdir -p "$agents_hardlink_target"
+printf '# Shared inode must remain intact\n' > "$agents_hardlink_target/AGENTS.md"
+ln "$agents_hardlink_target/AGENTS.md" "$agents_hardlink_target/AGENTS.md.shared"
+cp "$agents_hardlink_target/AGENTS.md" "$TMP_DIR/agents-hardlink-before.md"
+run_installer_in_pty "$REPO_ROOT/install.sh" "$agents_hardlink_target" y "$TMP_DIR/agents-hardlink.log" \
+  || fail "hard-linked AGENTS.md refusal unexpectedly failed the installer"
+cmp -s "$TMP_DIR/agents-hardlink-before.md" "$agents_hardlink_target/AGENTS.md" \
+  || fail "hard-linked AGENTS.md was replaced"
+python3 - "$agents_hardlink_target/AGENTS.md" "$agents_hardlink_target/AGENTS.md.shared" <<'PY'
+import os
+import sys
+
+assert os.path.samefile(*sys.argv[1:]), "AGENTS.md hard-link relationship was broken"
+PY
+grep -Fq 'PRESERVED existing file (managed routing not applied): AGENTS.md' "$TMP_DIR/agents-hardlink.log" \
+  || fail "hard-linked AGENTS.md refusal was not reported"
+
+# Untrusted control sequences in existing AGENTS.md content must be rendered
+# visibly, never emitted as terminal control bytes in the proposed diff.
+agents_control_target="$TMP_DIR/agents-control-target"
+mkdir -p "$agents_control_target"
+python3 - "$agents_control_target/AGENTS.md" <<'PY'
+import sys
+from pathlib import Path
+
+Path(sys.argv[1]).write_bytes(
+    b"# Terminal content\n"
+    b"unsafe: \x1b[2J CSI \x1b]0;title-test\x07 C1: \xc2\x9b\n"
+)
+PY
+run_installer_in_pty "$REPO_ROOT/install.sh" "$agents_control_target" n "$TMP_DIR/agents-control.log" \
+  || fail "declining a control-character AGENTS.md update failed unexpectedly"
+python3 - "$TMP_DIR/agents-control.log" <<'PY'
+import sys
+from pathlib import Path
+
+output = Path(sys.argv[1]).read_bytes()
+for control in (b"\x1b", b"\x07", b"\xc2\x9b"):
+    assert control not in output, f"raw terminal control byte was emitted: {control!r}"
+for visible in (b"\\x1b[2J", b"\\x1b]0;title-test", b"\\x07", b"\\x9b"):
+    assert visible in output, f"escaped control was not visible in diff: {visible!r}"
+PY
+
+# Without a controlling terminal the managed change is not applied, and the
+# installer must return a detectable incomplete status without claiming success.
+agents_no_tty_target="$TMP_DIR/agents-no-tty-target"
+mkdir -p "$agents_no_tty_target"
+printf '# Keep without a TTY\n' > "$agents_no_tty_target/AGENTS.md"
+cp "$agents_no_tty_target/AGENTS.md" "$TMP_DIR/agents-no-tty-before.md"
+python3 - "$REPO_ROOT/install.sh" "$agents_no_tty_target" "$TMP_DIR/agents-no-tty.log" <<'PY'
+import subprocess
+import sys
+from pathlib import Path
+
+installer, target, output_path = sys.argv[1:]
+with Path(output_path).open("wb") as output:
+    result = subprocess.run(
+        ["bash", installer, "--target", target, "--no-hooks"],
+        stdin=subprocess.DEVNULL,
+        stdout=output,
+        stderr=subprocess.STDOUT,
+        start_new_session=True,
+    )
+if result.returncode != 4:
+    raise SystemExit(f"expected exit status 4 without a controlling terminal, got {result.returncode}")
+PY
+cmp -s "$TMP_DIR/agents-no-tty-before.md" "$agents_no_tty_target/AGENTS.md" \
+  || fail "no-TTY confirmation path changed AGENTS.md"
+grep -Fq 'explicit confirmation requires a controlling terminal' "$TMP_DIR/agents-no-tty.log" \
+  || fail "no-TTY confirmation requirement was not reported"
+grep -Fq 'installation incomplete:' "$TMP_DIR/agents-no-tty.log" \
+  || fail "no-TTY installation did not report its incomplete state"
+if grep -Fq 'Installation complete for:' "$TMP_DIR/agents-no-tty.log"; then
+  fail "no-TTY installation falsely claimed completion"
+fi
+
 # Declining confirmation leaves AGENTS.md unchanged and reports the conflict.
 agents_decline_target="$TMP_DIR/agents-decline-target"
 mkdir -p "$agents_decline_target"

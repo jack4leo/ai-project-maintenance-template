@@ -142,6 +142,107 @@ cat > "$managed_route_file" <<'ROUTE'
 <!-- END SELF-EVOLUTION-FLYWHEEL MANAGED ROUTING -->
 ROUTE
 
+display_managed_diff() {
+  python3 - "$1" "$2" <<'PY'
+import subprocess
+import sys
+import unicodedata
+
+try:
+    process = subprocess.Popen(
+        ["diff", "-u", "-L", "AGENTS.md (current)", "-L", "AGENTS.md (proposed)", *sys.argv[1:]],
+        stdout=subprocess.PIPE,
+    )
+except OSError as exc:
+    print(f"ERROR: could not start diff: {exc}", file=sys.stderr)
+    sys.exit(2)
+
+def escape_controls(raw):
+    text = raw.decode("utf-8", "surrogateescape")
+    escaped = []
+    for char in text:
+        codepoint = ord(char)
+        category = unicodedata.category(char)
+        if char == "\n":
+            escaped.append(char)
+        elif 0xDC80 <= codepoint <= 0xDCFF:
+            escaped.append(f"\\x{codepoint - 0xDC00:02x}")
+        elif category.startswith("C") or category in {"Zl", "Zp"}:
+            if codepoint <= 0xFF:
+                escaped.append(f"\\x{codepoint:02x}")
+            elif codepoint <= 0xFFFF:
+                escaped.append(f"\\u{codepoint:04x}")
+            else:
+                escaped.append(f"\\U{codepoint:08x}")
+        else:
+            escaped.append(char)
+    return "".join(escaped)
+
+assert process.stdout is not None
+for line in iter(process.stdout.readline, b""):
+    sys.stdout.buffer.write(escape_controls(line).encode("utf-8"))
+    sys.stdout.buffer.flush()
+process.stdout.close()
+sys.exit(process.wait())
+PY
+}
+
+preserve_managed_agents_metadata() {
+  python3 - "$1" "$2" <<'PY'
+import os
+import stat
+import sys
+
+source, staged = sys.argv[1:]
+try:
+    original = os.stat(source, follow_symlinks=False)
+    if not stat.S_ISREG(original.st_mode):
+        raise OSError("source is no longer a regular file")
+    if original.st_nlink > 1:
+        raise OSError("atomic replacement would break hard links")
+
+    attributes = {
+        name: os.getxattr(source, name, follow_symlinks=False)
+        for name in os.listxattr(source, follow_symlinks=False)
+    }
+    staged_stat = os.stat(staged, follow_symlinks=False)
+    if (staged_stat.st_uid, staged_stat.st_gid) != (original.st_uid, original.st_gid):
+        os.chown(staged, original.st_uid, original.st_gid, follow_symlinks=False)
+    os.chmod(staged, stat.S_IMODE(original.st_mode), follow_symlinks=False)
+
+    for name in os.listxattr(staged, follow_symlinks=False):
+        if name not in attributes:
+            os.removexattr(staged, name, follow_symlinks=False)
+    for name, value in attributes.items():
+        os.setxattr(staged, name, value, follow_symlinks=False)
+    os.utime(
+        staged,
+        ns=(original.st_atime_ns, original.st_mtime_ns),
+        follow_symlinks=False,
+    )
+
+    result = os.stat(staged, follow_symlinks=False)
+    result_attributes = {
+        name: os.getxattr(staged, name, follow_symlinks=False)
+        for name in os.listxattr(staged, follow_symlinks=False)
+    }
+    if (
+        (result.st_uid, result.st_gid) != (original.st_uid, original.st_gid)
+        or stat.S_IMODE(result.st_mode) != stat.S_IMODE(original.st_mode)
+        or result.st_atime_ns != original.st_atime_ns
+        or result.st_mtime_ns != original.st_mtime_ns
+        or result_attributes != attributes
+    ):
+        raise OSError("staged metadata did not match the original")
+except (OSError, AttributeError, NotImplementedError):
+    print(
+        "ERROR: could not safely preserve AGENTS.md ownership, permissions, ACLs, or extended attributes; left unchanged.",
+        file=sys.stderr,
+    )
+    sys.exit(1)
+PY
+}
+
 prepare_managed_agents() {
   local destination_path="$1"
   local baseline="$work_dir/agents.original"
@@ -158,8 +259,6 @@ prepare_managed_agents() {
   stage_file="$(mktemp "$TARGET_DIR/.AGENTS.md.XXXXXX")"
   action_file="$work_dir/agents-action"
   if ! python3 - "$baseline" "$managed_route_file" "$stage_file" "$action_file" <<'PY'
-import os
-import stat
 import sys
 from pathlib import Path
 
@@ -198,7 +297,6 @@ else:
 try:
     with stage_path.open("w", encoding="utf-8", newline="") as handle:
         handle.write(updated)
-    os.chmod(stage_path, stat.S_IMODE(source.stat().st_mode))
     action_path.write_text(action + "\n", encoding="utf-8")
 except OSError as exc:
     print(f"ERROR: cannot stage managed routing for AGENTS.md: {exc}; left unchanged.", file=sys.stderr)
@@ -217,7 +315,7 @@ PY
   fi
 
   echo "Proposed diff for AGENTS.md (no changes applied yet):"
-  diff -u -L "AGENTS.md (current)" -L "AGENTS.md (proposed)" "$baseline" "$stage_file" || diff_status=$?
+  display_managed_diff "$baseline" "$stage_file" || diff_status=$?
   if ((diff_status > 1)); then
     echo "PRESERVED existing file (could not display the proposed diff): AGENTS.md" >&2
     rm -f "$stage_file"
@@ -232,10 +330,10 @@ PY
   if ! exec 3<>/dev/tty 2>/dev/null; then
     echo "PRESERVED AGENTS.md: explicit confirmation requires a controlling terminal." >&2
     rm -f "$stage_file"
-    return 1
+    return 2
   fi
   if [[ ! -t 1 ]]; then
-    diff -u -L "AGENTS.md (current)" -L "AGENTS.md (proposed)" "$baseline" "$stage_file" >&3 || diff_status=$?
+    display_managed_diff "$baseline" "$stage_file" >&3 || diff_status=$?
     if ((diff_status > 1)); then
       echo "PRESERVED existing file (could not display the proposed diff on the controlling terminal): AGENTS.md" >&2
       rm -f "$stage_file"
@@ -260,6 +358,11 @@ PY
     rm -f "$stage_file"
     return 1
   fi
+  if ! preserve_managed_agents_metadata "$destination_path" "$stage_file"; then
+    echo "PRESERVED AGENTS.md: could not safely preserve the original file metadata; left unchanged." >&2
+    rm -f "$stage_file"
+    return 1
+  fi
   if ! mv -f "$stage_file" "$destination_path"; then
     echo "PRESERVED AGENTS.md: could not apply the confirmed managed routing change." >&2
     rm -f "$stage_file"
@@ -275,6 +378,7 @@ PY
 
 prompt_ready=0
 conflicts=()
+confirmation_required=0
 for relative_path in "${files[@]}"; do
   source_path="$SOURCE_DIR/$relative_path"
   destination_path="$TARGET_DIR/$relative_path"
@@ -290,8 +394,12 @@ for relative_path in "${files[@]}"; do
       elif prepare_managed_agents "$destination_path"; then
         :
       else
+        managed_status=$?
         echo "PRESERVED existing file (managed routing not applied): AGENTS.md"
         conflicts+=("$relative_path")
+        if ((managed_status == 2)); then
+          confirmation_required=1
+        fi
       fi
       continue
     fi
@@ -413,6 +521,11 @@ Startup hooks are registered in project-local settings. They only check for
 run shell commands from the project or fetch network content. Codex/Claude Code
 may require you to review/trust the project hook before it runs. See docs/installation.md.
 NOTICE
+fi
+
+if ((confirmation_required)); then
+  echo "ERROR: installation incomplete: AGENTS.md routing was not applied; rerun with a controlling terminal to review and confirm." >&2
+  exit 4
 fi
 
 if [[ -n "$BOOTSTRAP_AGENT" ]]; then

@@ -35,6 +35,7 @@
 
 - 每日复盘运行方式 / agent：`UNKNOWN`
 - 运行时间 / 时区：`UNKNOWN`
+- 复盘记录归档位置：`docs/reviews/YYYY-MM-DD.md`（模板约定；项目可由维护者调整）
 - 最近完成复盘的 reviewed-through SHA：`UNKNOWN`（同时更新 `LESSONS.md` 顶部标记）
 - 最后复盘日期：`UNKNOWN`
 - Lesson 晋升门槛：默认 3 个不同复盘日期，见 [`LESSONS.md`](../LESSONS.md)。仅由维护者明确调整。

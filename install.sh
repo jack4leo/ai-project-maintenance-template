@@ -167,7 +167,10 @@ try:
         for name in os.listxattr(filename, follow_symlinks=False):
             os.getxattr(filename, name, follow_symlinks=False)
         with open(filename, encoding="utf-8") as handle:
-            config = json.load(handle)
+            try:
+                config = json.load(handle)
+            finally:
+                os.utime(handle.fileno(), ns=(info.st_atime_ns, info.st_mtime_ns))
     else:
         config = {}
 except Exception as exc:
@@ -547,7 +550,10 @@ if os.path.lexists(filename):
             for name in os.listxattr(filename, follow_symlinks=False)
         }
         with filename.open(encoding="utf-8") as handle:
-            config = json.load(handle)
+            try:
+                config = json.load(handle)
+            finally:
+                os.utime(handle.fileno(), ns=(original.st_atime_ns, original.st_mtime_ns))
     except Exception as exc:
         print(f"ERROR: cannot safely parse {filename}: {exc}", file=sys.stderr)
         print("       No settings were changed; merge the hook manually.", file=sys.stderr)

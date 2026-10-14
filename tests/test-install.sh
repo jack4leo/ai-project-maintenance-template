@@ -183,6 +183,8 @@ try:
 except OSError as exc:
     if exc.errno not in {errno.EPERM, errno.ENOTSUP, errno.EOPNOTSUPP, errno.ENOSYS}:
         raise
+initial = os.stat(filename)
+os.utime(filename, ns=(max(0, initial.st_mtime_ns - 172800 * 1_000_000_000), initial.st_mtime_ns))
 info = os.stat(filename)
 attrs = {name: os.getxattr(filename, name) for name in os.listxattr(filename)}
 expected_path.write_text(json.dumps({

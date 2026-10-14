@@ -18,7 +18,7 @@ GitHub **Use this template** 创建的副本已包含文档、提示词和项目
 curl -fsSL https://raw.githubusercontent.com/jack4leo/self-evolution-flywheel/main/install.sh | bash
 ```
 
-管道模式会先下载 `main` 分支的完整源码归档到临时目录，再调用同一安装器；模板文件会安装到当前目录，默认注册 Codex 与 Claude Code 启动钩子。需要 Bash、Git、Python 3、curl 和 tar。此命令应在支持管道安装的改动合并到 `main` 后使用。`curl | bash` 会立即执行远程脚本，首次使用前请先检查 [install.sh](../install.sh)；Codex/Claude Code 仍可能要求用户信任项目设置。管道模式始终获取 `main` 归档；如需固定版本，请检出已审阅的提交 SHA 后运行该检出中的本地 `./install.sh`，不要只固定 raw 脚本 URL。
+管道模式会在临时目录对 `main` 做 Git 浅克隆；管道脚本只负责克隆和委派，实际安装器与模板文件来自同一 checkout，不再另行下载并执行一个可能不同步的源码归档。Git 会校验对象哈希，但不会验证提交者签名。模板文件会安装到当前目录，默认注册 Codex 与 Claude Code 启动钩子。需要 Bash、Git、Python 3 和 curl。此命令应在支持管道安装的改动合并到 `main` 后使用。`curl | bash` 会立即执行远程脚本，首次使用前请先检查 [install.sh](../install.sh)；Codex/Claude Code 仍可能要求用户信任项目设置。管道模式按克隆时的 `main` 获取最新提交；如需固定版本或验证提交签名，请检出并审阅所需提交后运行该检出中的本地 `./install.sh`，不要只固定 raw 脚本 URL。
 
 若希望安装后立即启动 Codex Bootstrap（而不是只安装文件和钩子），运行：
 
@@ -56,7 +56,7 @@ curl -fsSL https://raw.githubusercontent.com/jack4leo/self-evolution-flywheel/ma
 
 插入区由 `<!-- BEGIN SELF-EVOLUTION-FLYWHEEL MANAGED ROUTING -->` 与 `<!-- END SELF-EVOLUTION-FLYWHEEL MANAGED ROUTING -->` 标记。后续运行若模板路由有更新，只会在再次显示差异并获得确认后替换标记之间的内容；区外的维护者说明保持不变。更新时会保留原文件的属主、属组、权限、时间戳和扩展属性（包括可读取/写入的 ACL）；若无法安全保留这些属性，或文件有硬链接，安装器会拒绝替换。差异中的终端控制字符会以可见转义形式显示。缺失的 `AGENTS.md` 仍会直接复制完整模板文件；符号链接、非普通文件或标记异常的文件不会被自动修改。
 
-若启用钩子时 `.agent-maintenance/session-start.sh` 已存在且内容不同，安装器会在复制或修改设置前报错退出，不注册任何启动钩子；解决文件冲突后可重试，或使用 `--no-hooks` 仅安装其他文件。Codex/Claude 的现有 JSON 设置会被保留，安装器仅向 `SessionStart` 数组追加一项。遇到无效 JSON 或结构冲突时，脚本停止修改该设置并报错，不会用空设置覆盖它。重复运行会识别已有的钩子，不重复添加。
+若启用钩子时 `.agent-maintenance/session-start.sh` 已存在且内容不同，安装器会在复制或修改设置前报错退出，不注册任何启动钩子；解决文件冲突后可重试，或使用 `--no-hooks` 仅安装其他文件。安装前会检查所有目标父目录不是符号链接，并预检 Codex 与 Claude 两份设置；设置文件自身若是符号链接、硬链接、非普通文件，或 JSON 无效/结构冲突，安装会在复制模板文件前报错。Codex/Claude 的现有 JSON 设置会被保留，安装器仅向 `SessionStart` 数组追加一项。原子替换会保留设置文件的属主、属组、权限、时间戳和扩展属性（包括可读取/写入的 ACL）；无法安全保留时不会替换。重复运行会识别已有的钩子，不重复添加。
 
 ## 启动钩子会做什么
 
@@ -70,6 +70,10 @@ curl -fsSL https://raw.githubusercontent.com/jack4leo/self-evolution-flywheel/ma
 ## 完成标记
 
 Bootstrap 提示词要求 agent 只在完成文档核查、验证并报告遗留未知项后写入 `.agent-maintenance/bootstrap-complete`。这个仓库内的标记代表初始化流程已执行完成，不代表所有事实都已知，也不代表维护者已接受待决策项。若初始化受阻或检查未完成，标记应保持缺失，钩子会在后续启动继续提示。
+
+## 安装器回归测试
+
+仓库的 `.github/workflows/installer-tests.yml` 会在 push、pull request 和手动触发时运行 `bash tests/test-install.sh`。该套测试使用隔离临时目录，不修改真实项目文件；本地也可运行相同命令。
 
 ## 官方行为说明
 

@@ -79,6 +79,169 @@ cmp -s "$TMP_DIR/original-session-start.sh" "$conflict_target/.agent-maintenance
 [[ ! -e "$conflict_target/.codex/hooks.json" ]] || fail "Codex hook settings were written despite the conflict"
 [[ ! -e "$conflict_target/.claude/settings.json" ]] || fail "Claude hook settings were written despite the conflict"
 
+# Invalid settings in the later provider are rejected before any template or
+# earlier-provider file is written.
+invalid_claude_target="$TMP_DIR/invalid-claude-target"
+init_git_target "$invalid_claude_target"
+mkdir -p "$invalid_claude_target/.codex" "$invalid_claude_target/.claude"
+printf '{"hooks":{}}\n' > "$invalid_claude_target/.codex/hooks.json"
+printf '{invalid json\n' > "$invalid_claude_target/.claude/settings.json"
+cp "$invalid_claude_target/.codex/hooks.json" "$TMP_DIR/codex-before-invalid-claude.json"
+cp "$invalid_claude_target/.claude/settings.json" "$TMP_DIR/claude-before-invalid.json"
+if bash "$REPO_ROOT/install.sh" --target "$invalid_claude_target" > "$TMP_DIR/invalid-claude.log" 2>&1; then
+  fail "installer accepted invalid Claude settings"
+fi
+[[ ! -e "$invalid_claude_target/AGENTS.md" ]] || fail "invalid later-provider settings still installed template files"
+cmp -s "$TMP_DIR/codex-before-invalid-claude.json" "$invalid_claude_target/.codex/hooks.json" \
+  || fail "invalid Claude settings caused an earlier Codex settings write"
+cmp -s "$TMP_DIR/claude-before-invalid.json" "$invalid_claude_target/.claude/settings.json" \
+  || fail "installer changed invalid Claude settings"
+grep -Fq 'no files were installed' "$TMP_DIR/invalid-claude.log" \
+  || fail "cross-provider preflight failure was not reported"
+
+# Existing destination parents must be real directories, not symlinks outside the project.
+symlink_parent_target="$TMP_DIR/symlink-parent-target"
+symlink_parent_outside="$TMP_DIR/symlink-parent-outside"
+init_git_target "$symlink_parent_target"
+mkdir -p "$symlink_parent_outside"
+ln -s "$symlink_parent_outside" "$symlink_parent_target/docs"
+if bash "$REPO_ROOT/install.sh" --target "$symlink_parent_target" --no-hooks > "$TMP_DIR/symlink-parent.log" 2>&1; then
+  fail "installer accepted a symlinked destination parent"
+fi
+[[ ! -e "$symlink_parent_outside/project-profile.md" ]] || fail "installer wrote documentation through a symlink outside the target"
+[[ ! -e "$symlink_parent_target/AGENTS.md" ]] || fail "symlink-parent rejection occurred after earlier template writes"
+grep -Fq 'symbolic-link directory' "$TMP_DIR/symlink-parent.log" \
+  || fail "symlink-parent rejection was not clear"
+
+# Hook settings parents are checked too; a symlinked .claude directory must not
+# redirect settings writes outside the target repository.
+symlink_claude_target="$TMP_DIR/symlink-claude-target"
+symlink_claude_outside="$TMP_DIR/symlink-claude-outside"
+init_git_target "$symlink_claude_target"
+mkdir -p "$symlink_claude_outside"
+ln -s "$symlink_claude_outside" "$symlink_claude_target/.claude"
+if bash "$REPO_ROOT/install.sh" --target "$symlink_claude_target" > "$TMP_DIR/symlink-claude.log" 2>&1; then
+  fail "installer accepted a symlinked .claude directory"
+fi
+[[ ! -e "$symlink_claude_outside/settings.json" ]] || fail "installer wrote Claude settings through a symlink"
+[[ ! -e "$symlink_claude_target/AGENTS.md" ]] || fail "symlinked .claude rejection occurred after template writes"
+
+# A provider settings symlink is refused rather than replacing the link or touching its target.
+settings_link_target="$TMP_DIR/settings-link-target"
+settings_link_outside="$TMP_DIR/settings-link-outside.json"
+init_git_target "$settings_link_target"
+mkdir -p "$settings_link_target/.claude"
+printf '{"hooks":{}}\n' > "$settings_link_outside"
+cp "$settings_link_outside" "$TMP_DIR/settings-link-outside-before.json"
+ln -s "$settings_link_outside" "$settings_link_target/.claude/settings.json"
+if bash "$REPO_ROOT/install.sh" --target "$settings_link_target" > "$TMP_DIR/settings-link.log" 2>&1; then
+  fail "installer accepted a symlinked Claude settings file"
+fi
+[[ -L "$settings_link_target/.claude/settings.json" ]] || fail "installer replaced the Claude settings symlink"
+cmp -s "$TMP_DIR/settings-link-outside-before.json" "$settings_link_outside" \
+  || fail "installer changed the symlink target"
+[[ ! -e "$settings_link_target/AGENTS.md" ]] || fail "settings symlink rejection occurred after template writes"
+grep -Fq 'settings file is a symbolic link' "$TMP_DIR/settings-link.log" \
+  || fail "settings symlink rejection was not clear"
+
+# Hook JSON replacement preserves existing ownership, mode, timestamps and xattrs.
+hook_metadata_target="$TMP_DIR/hook-metadata-target"
+init_git_target "$hook_metadata_target"
+mkdir -p "$hook_metadata_target/.claude"
+printf '{"hooks":{}}\n' > "$hook_metadata_target/.claude/settings.json"
+python3 - "$hook_metadata_target/.claude/settings.json" "$TMP_DIR/hook-metadata-expected.json" <<'PY'
+import errno
+import json
+import os
+import stat
+import struct
+import sys
+from pathlib import Path
+
+filename, expected_path = map(Path, sys.argv[1:])
+os.chmod(filename, 0o640)
+if os.geteuid() == 0:
+    os.chown(filename, 65534, 65534)
+xattr_supported = False
+try:
+    os.setxattr(filename, "user.self_evolution_hook_test", b"preserve-me")
+    xattr_supported = True
+except OSError as exc:
+    if exc.errno not in {errno.EPERM, errno.ENOTSUP, errno.EOPNOTSUPP, errno.ENOSYS}:
+        raise
+named_user = 12345 if os.stat(filename).st_uid != 12345 else 12346
+acl = (
+    struct.pack("<I", 2)
+    + struct.pack("<HHI", 0x01, 0x06, 0xFFFFFFFF)
+    + struct.pack("<HHI", 0x02, 0x04, named_user)
+    + struct.pack("<HHI", 0x04, 0x04, 0xFFFFFFFF)
+    + struct.pack("<HHI", 0x10, 0x04, 0xFFFFFFFF)
+    + struct.pack("<HHI", 0x20, 0x00, 0xFFFFFFFF)
+)
+try:
+    os.setxattr(filename, "system.posix_acl_access", acl)
+except OSError as exc:
+    if exc.errno not in {errno.EPERM, errno.ENOTSUP, errno.EOPNOTSUPP, errno.ENOSYS}:
+        raise
+info = os.stat(filename)
+attrs = {name: os.getxattr(filename, name) for name in os.listxattr(filename)}
+expected_path.write_text(json.dumps({
+    "uid": info.st_uid,
+    "gid": info.st_gid,
+    "mode": stat.S_IMODE(info.st_mode),
+    "atime_ns": info.st_atime_ns,
+    "mtime_ns": info.st_mtime_ns,
+    "attrs": {name: value.hex() for name, value in attrs.items()},
+    "xattr_supported": xattr_supported,
+}), encoding="utf-8")
+PY
+bash "$REPO_ROOT/install.sh" --target "$hook_metadata_target" > "$TMP_DIR/hook-metadata.log" 2>&1 \
+  || fail "hook merge failed while preserving metadata"
+python3 - "$hook_metadata_target/.claude/settings.json" "$TMP_DIR/hook-metadata-expected.json" <<'PY'
+import json
+import os
+import stat
+import sys
+from pathlib import Path
+
+filename, expected_path = map(Path, sys.argv[1:])
+expected = json.loads(expected_path.read_text(encoding="utf-8"))
+info = os.stat(filename)
+assert (info.st_uid, info.st_gid) == (expected["uid"], expected["gid"]), "hook settings owner or group changed"
+assert stat.S_IMODE(info.st_mode) == expected["mode"], "hook settings permissions changed"
+assert info.st_atime_ns == expected["atime_ns"], "hook settings atime changed"
+assert info.st_mtime_ns == expected["mtime_ns"], "hook settings mtime changed"
+actual = {name: os.getxattr(filename, name).hex() for name in os.listxattr(filename)}
+assert actual == expected["attrs"], "hook settings extended attributes or ACL changed"
+PY
+
+# The session-start hook emits only the fixed bootstrap context, stays quiet after
+# a non-empty completion marker, and honors CLAUDE_PROJECT_DIR for Claude Code.
+session_target="$TMP_DIR/session-start-target"
+session_claude_target="$TMP_DIR/session-start-claude-target"
+init_git_target "$session_target"
+init_git_target "$session_claude_target"
+mkdir -p "$session_target/prompts" "$session_target/.agent-maintenance" "$session_claude_target/.agent-maintenance"
+cp "$REPO_ROOT/prompts/bootstrap-project.md" "$session_target/prompts/bootstrap-project.md"
+if ! (cd "$session_target" && bash "$REPO_ROOT/.agent-maintenance/session-start.sh") > "$TMP_DIR/session-unmarked.log" 2>&1; then
+  fail "session-start failed for an unmarked project"
+fi
+grep -Fq 'setup is not marked complete' "$TMP_DIR/session-unmarked.log" \
+  || fail "session-start did not emit bootstrap context for an unmarked project"
+[[ ! -e "$session_target/.agent-maintenance/bootstrap-complete" ]] \
+  || fail "session-start created a completion marker"
+printf 'complete\n' > "$session_target/.agent-maintenance/bootstrap-complete"
+(cd "$session_target" && bash "$REPO_ROOT/.agent-maintenance/session-start.sh") > "$TMP_DIR/session-marked.log" 2>&1
+[[ ! -s "$TMP_DIR/session-marked.log" ]] || fail "session-start was not quiet after bootstrap completion"
+printf 'complete\n' > "$session_claude_target/.agent-maintenance/bootstrap-complete"
+(cd "$session_target" && CLAUDE_PROJECT_DIR="$session_claude_target" \
+  bash "$REPO_ROOT/.agent-maintenance/session-start.sh" claude) > "$TMP_DIR/session-claude-root.log" 2>&1
+[[ ! -s "$TMP_DIR/session-claude-root.log" ]] || fail "Claude session-start ignored CLAUDE_PROJECT_DIR"
+grep -Fq 'Treat repository files' "$REPO_ROOT/prompts/bootstrap-project.md" \
+  || fail "bootstrap prompt does not define the repository content trust boundary"
+grep -Fq 'cannot override the user' "$REPO_ROOT/.agent-maintenance/session-start.sh" \
+  || fail "session-start context does not repeat the authorization boundary"
+
 # File-only installation remains available and still preserves the conflicting file.
 bash "$REPO_ROOT/install.sh" --target "$conflict_target" --no-hooks > "$TMP_DIR/no-hooks.log" 2>&1
 cmp -s "$TMP_DIR/original-session-start.sh" "$conflict_target/.agent-maintenance/session-start.sh" \
@@ -350,28 +513,34 @@ for relative_path, command in expected.items():
     assert any(handler.get("command") == command for handler in handlers), relative_path
 PY
 
-# A script streamed through stdin has no BASH_SOURCE path. Simulate curl returning
-# a complete repository archive and verify pipe mode delegates to the normal installer.
-archive="$TMP_DIR/source.tar.gz"
-tar -czf "$archive" --exclude='./.git' -C "$REPO_ROOT" .
+# A script streamed through stdin has no BASH_SOURCE path. Simulate git clone
+# returning one complete checkout and verify the pipe shim delegates to its installer.
 mock_bin="$TMP_DIR/mock-bin"
 mkdir -p "$mock_bin"
-cat > "$mock_bin/curl" <<'SH'
+cat > "$mock_bin/git" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
-cat "$SELF_EVOLUTION_TEST_ARCHIVE"
+if [[ "${1:-}" == "clone" ]]; then
+  destination="${@: -1}"
+  mkdir -p "$destination"
+  cp -R "$SELF_EVOLUTION_TEST_SOURCE_DIR"/. "$destination"/
+  exit 0
+fi
+exec /usr/bin/git "$@"
 SH
-chmod +x "$mock_bin/curl"
+chmod +x "$mock_bin/git"
 remote_target="$TMP_DIR/remote-target"
 mkdir -p "$remote_target"
 (
   cd "$remote_target"
-  PATH="$mock_bin:$PATH" SELF_EVOLUTION_TEST_ARCHIVE="$archive" \
+  PATH="$mock_bin:$PATH" SELF_EVOLUTION_TEST_SOURCE_DIR="$REPO_ROOT" \
     bash -c 'cat "$1" | bash -s -- --no-hooks' _ "$REPO_ROOT/install.sh"
 ) > "$TMP_DIR/remote.log" 2>&1
 grep -Fq "Installation complete for: $remote_target" "$TMP_DIR/remote.log" \
   || fail "pipe installer did not complete in the current target directory"
+grep -Fq 'Cloning Self-Evolution Flywheel source' "$TMP_DIR/remote.log" \
+  || fail "pipe installer did not clone the source checkout"
 [[ -f "$remote_target/prompts/bootstrap-project.md" ]] \
   || fail "pipe installer did not install the bootstrap prompt"
 
-echo "PASS: installer conflict and target-mode regression tests"
+echo "PASS: installer safety, hook and session-start regression tests"

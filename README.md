@@ -7,7 +7,7 @@
 ## 在新项目中使用
 
 1. 在 GitHub 选择 **Use this template** 创建项目副本，或将本仓库克隆到本地。模板副本已包含文档、提示词和 Codex/Claude Code 项目级启动钩子。
-2. 为已有项目安装时，在目标项目根目录运行 `./install.sh`。如果模板单独克隆在别处，运行 `/path/to/self-evolution-flywheel/install.sh --target /path/to/your-project`。安装器只补充缺失文件、保留内容不同的同名文件，并幂等合并启动钩子；细节见 [`docs/installation.md`](docs/installation.md)。
+2. 为已有项目安装时，在目标项目根目录运行 `./install.sh`。如果模板单独克隆在别处，运行 `/path/to/self-evolution-flywheel/install.sh --target /path/to/your-project`。安装器只补充缺失文件；遇到不同的 `AGENTS.md` 时会先显示差异并征求确认，默认在首行插入可幂等更新的受管路由区，其他冲突文件仍会保留；启动钩子以幂等方式合并。细节见 [`docs/installation.md`](docs/installation.md)。
 3. 想立即执行初始化时，运行 `./install.sh --bootstrap codex` 或 `./install.sh --bootstrap claude`。若只运行 `./install.sh`，钩子会在项目后续启动时向 agent 注入初始化指令；交互会话要等首个模型回合，钩子本身不会启动模型。
 4. 让项目 agent 完整执行 [`prompts/bootstrap-project.md`](prompts/bootstrap-project.md)。它会检查真实源码、包管理清单、CI 和现有文档，再填写 `docs/project-profile.md`、项目专属 `docs/code-standards.md`、`docs/contributors.md` 与 `docs/subsystems/`。
 5. 由维护者核验自动整理出的事实、测试命令、权限边界和任何需要人作出的产品/安全决定；未知项必须留为 `UNKNOWN`，不得猜测。完成后 agent 写入 `.agent-maintenance/bootstrap-complete`，后续启动钩子即不再重复提醒。

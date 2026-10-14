@@ -17,7 +17,7 @@
 - [`AGENTS.md`](AGENTS.md)：短路由表；告诉 agent 开始工作前要读哪里以及收尾要做什么。
 - [`CLAUDE.md`](CLAUDE.md)：Claude Code 入口，导入共享路由表和 Lessons，不复制规则。
 - [`LESSONS.md`](LESSONS.md)：目标项目的动态错题本，由 agent 根据真实提交、返工和验证证据维护。
-- [`docs/project-profile.md`](docs/project-profile.md)：项目差异、验证命令、风险门槛、自治边界和复盘水位。
+- [`docs/project-profile.md`](docs/project-profile.md)：项目差异、验证命令、风险门槛、自治边界、复盘归档位置和水位。
 - [`docs/code-standards.md`](docs/code-standards.md)：跨项目通用基线 + agent 根据项目证据维护的专属规则。
 - [`docs/contributors.md`](docs/contributors.md)：社区 PR 的安全筛查框架；项目政策、名单和决定不可由 agent 擅自编造。
 - [`docs/subsystems/README.md`](docs/subsystems/README.md)：子系统文档索引和维护协议；具体页面从目标项目源码生成。

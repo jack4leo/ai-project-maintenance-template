@@ -52,7 +52,9 @@ curl -fsSL https://raw.githubusercontent.com/jack4leo/self-evolution-flywheel/ma
 
 安装器复制根目录的 `AGENTS.md`、`CLAUDE.md`、`LESSONS.md`、安装器本身、`.agent-maintenance/session-start.sh`、`.github/PULL_REQUEST_TEMPLATE.md`，以及 `docs/`（不含仅描述模板来源的 `docs/source-and-extraction.md`）和 `prompts/` 下的文件。不会用模板版 `README.md` 替换目标项目自己的 README。
 
-已存在且内容不同的目标文件一律保留，并在输出中列为冲突；脚本不会提供静默覆盖模式。若启用钩子时 `.agent-maintenance/session-start.sh` 已存在且内容不同，安装器会在复制或修改设置前报错退出，不注册任何启动钩子；解决文件冲突后可重试，或使用 `--no-hooks` 仅安装其他文件。Codex/Claude 的现有 JSON 设置会被保留，安装器仅向 `SessionStart` 数组追加一项。遇到无效 JSON 或结构冲突时，脚本停止修改该设置并报错，不会用空设置覆盖它。重复运行会识别已有的钩子，不重复添加。
+已存在且内容不同的目标文件默认保留，并在输出中列为冲突；脚本不会静默覆盖。`AGENTS.md` 是唯一例外：安装器会先显示把精简路由区插入后的 unified diff，再通过控制终端询问维护者。明确输入 `y` 才会应用；默认位置是文件首行，按 Enter、输入其他内容或没有可用控制终端都会保留原文件。插入区由 `<!-- BEGIN SELF-EVOLUTION-FLYWHEEL MANAGED ROUTING -->` 与 `<!-- END SELF-EVOLUTION-FLYWHEEL MANAGED ROUTING -->` 标记。后续运行若模板路由有更新，只会在再次显示差异并获得确认后替换标记之间的内容；区外的维护者说明保持不变。缺失的 `AGENTS.md` 仍会直接复制完整模板文件；符号链接、非普通文件或标记异常的文件不会被自动修改。
+
+若启用钩子时 `.agent-maintenance/session-start.sh` 已存在且内容不同，安装器会在复制或修改设置前报错退出，不注册任何启动钩子；解决文件冲突后可重试，或使用 `--no-hooks` 仅安装其他文件。Codex/Claude 的现有 JSON 设置会被保留，安装器仅向 `SessionStart` 数组追加一项。遇到无效 JSON 或结构冲突时，脚本停止修改该设置并报错，不会用空设置覆盖它。重复运行会识别已有的钩子，不重复添加。
 
 ## 启动钩子会做什么
 

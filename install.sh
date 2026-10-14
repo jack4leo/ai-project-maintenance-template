@@ -26,8 +26,10 @@ usage() {
 Usage: ./install.sh [--target DIR] [--no-hooks] [--bootstrap codex|claude]
 
 Install Self-Evolution Flywheel project guidance into an existing repository.
-Existing files are never overwritten. Existing Codex/Claude JSON settings are
-merged additively; invalid settings are left untouched and cause an error.
+Existing files are never overwritten. A different AGENTS.md may receive a
+reviewed, marker-delimited routing block; other conflicts are preserved.
+Existing Codex/Claude JSON settings are merged additively; invalid settings are
+left untouched and cause an error.
 
 Options:
   --target DIR              Destination project root (default: current directory)
@@ -127,6 +129,150 @@ if [[ "$INSTALL_HOOKS" == 1 ]]; then
   fi
 fi
 
+work_dir="$(mktemp -d)"
+trap 'rm -rf "$work_dir"' EXIT
+managed_route_file="$work_dir/agents-routing.md"
+cat > "$managed_route_file" <<'ROUTE'
+<!-- BEGIN SELF-EVOLUTION-FLYWHEEL MANAGED ROUTING -->
+## Self-Evolution Flywheel
+
+- Before work, read `docs/project-profile.md`, `LESSONS.md`, and `docs/code-standards.md`; read the affected subsystem page when relevant.
+- Follow repository evidence, documented validation, and permission boundaries; keep changes focused.
+- Before finishing, update affected docs/tests, run applicable checks, and report verified results and limitations.
+<!-- END SELF-EVOLUTION-FLYWHEEL MANAGED ROUTING -->
+ROUTE
+
+prepare_managed_agents() {
+  local destination_path="$1"
+  local baseline="$work_dir/agents.original"
+  local stage_file action_file action prompt answer diff_status=0
+
+  if ! command -v python3 >/dev/null 2>&1; then
+    echo "PRESERVED existing file (Python 3 is required to safely manage AGENTS.md): AGENTS.md" >&2
+    return 1
+  fi
+  if ! cp -p "$destination_path" "$baseline"; then
+    echo "PRESERVED existing file (could not snapshot it safely): AGENTS.md" >&2
+    return 1
+  fi
+  stage_file="$(mktemp "$TARGET_DIR/.AGENTS.md.XXXXXX")"
+  action_file="$work_dir/agents-action"
+  if ! python3 - "$baseline" "$managed_route_file" "$stage_file" "$action_file" <<'PY'
+import os
+import stat
+import sys
+from pathlib import Path
+
+source, route_path, stage_path, action_path = map(Path, sys.argv[1:])
+begin = "<!-- BEGIN SELF-EVOLUTION-FLYWHEEL MANAGED ROUTING -->"
+end = "<!-- END SELF-EVOLUTION-FLYWHEEL MANAGED ROUTING -->"
+
+try:
+    original = source.read_bytes()
+    text = original.decode("utf-8")
+    route = route_path.read_text(encoding="utf-8")
+except (OSError, UnicodeError) as exc:
+    print(f"ERROR: cannot safely prepare managed routing for AGENTS.md: {exc}; left unchanged.", file=sys.stderr)
+    sys.exit(3)
+
+newline = "\r\n" if "\r\n" in text else "\n"
+route = route.replace("\r\n", "\n").replace("\n", newline)
+lines = text.splitlines(keepends=True)
+markers = [line.rstrip("\r\n") for line in lines]
+begin_positions = [i for i, line in enumerate(markers) if line == begin]
+end_positions = [i for i, line in enumerate(markers) if line == end]
+
+if not begin_positions and not end_positions:
+    updated = route + newline + text
+    action = "insert"
+elif len(begin_positions) == 1 and len(end_positions) == 1 and begin_positions[0] < end_positions[0]:
+    first, last = begin_positions[0], end_positions[0]
+    prefix = "".join(lines[:first])
+    suffix = "".join(lines[last + 1 :])
+    updated = prefix + route + suffix
+    action = "update"
+else:
+    print("ERROR: AGENTS.md has missing, duplicated, or out-of-order managed routing markers; left unchanged.", file=sys.stderr)
+    sys.exit(3)
+
+try:
+    with stage_path.open("w", encoding="utf-8", newline="") as handle:
+        handle.write(updated)
+    os.chmod(stage_path, stat.S_IMODE(source.stat().st_mode))
+    action_path.write_text(action + "\n", encoding="utf-8")
+except OSError as exc:
+    print(f"ERROR: cannot stage managed routing for AGENTS.md: {exc}; left unchanged.", file=sys.stderr)
+    sys.exit(3)
+PY
+  then
+    rm -f "$stage_file"
+    return 1
+  fi
+
+  action="$(cat "$action_file")"
+  if cmp -s "$baseline" "$stage_file"; then
+    rm -f "$stage_file"
+    echo "UNCHANGED managed routing block in AGENTS.md"
+    return 0
+  fi
+
+  echo "Proposed diff for AGENTS.md (no changes applied yet):"
+  diff -u -L "AGENTS.md (current)" -L "AGENTS.md (proposed)" "$baseline" "$stage_file" || diff_status=$?
+  if ((diff_status > 1)); then
+    echo "PRESERVED existing file (could not display the proposed diff): AGENTS.md" >&2
+    rm -f "$stage_file"
+    return 1
+  fi
+
+  if [[ "$action" == "insert" ]]; then
+    prompt="Insert the managed routing block at the beginning of AGENTS.md? [y/N] "
+  else
+    prompt="Update the existing managed routing block in AGENTS.md? [y/N] "
+  fi
+  if ! exec 3<>/dev/tty 2>/dev/null; then
+    echo "PRESERVED AGENTS.md: explicit confirmation requires a controlling terminal." >&2
+    rm -f "$stage_file"
+    return 1
+  fi
+  if [[ ! -t 1 ]]; then
+    diff -u -L "AGENTS.md (current)" -L "AGENTS.md (proposed)" "$baseline" "$stage_file" >&3 || diff_status=$?
+    if ((diff_status > 1)); then
+      echo "PRESERVED existing file (could not display the proposed diff on the controlling terminal): AGENTS.md" >&2
+      rm -f "$stage_file"
+      exec 3>&-
+      return 1
+    fi
+  fi
+  printf '%s' "$prompt" >&3
+  IFS= read -r answer <&3 || answer=""
+  exec 3>&-
+  case "$answer" in
+    y|Y|yes|YES|Yes) ;;
+    *)
+      echo "PRESERVED AGENTS.md: managed routing change was not confirmed."
+      rm -f "$stage_file"
+      return 1
+      ;;
+  esac
+
+  if ! cmp -s "$baseline" "$destination_path"; then
+    echo "PRESERVED AGENTS.md: the file changed while awaiting confirmation; review and retry." >&2
+    rm -f "$stage_file"
+    return 1
+  fi
+  if ! mv -f "$stage_file" "$destination_path"; then
+    echo "PRESERVED AGENTS.md: could not apply the confirmed managed routing change." >&2
+    rm -f "$stage_file"
+    return 1
+  fi
+  if [[ "$action" == "insert" ]]; then
+    echo "INSERTED managed routing block at the beginning of AGENTS.md"
+  else
+    echo "UPDATED managed routing block in AGENTS.md"
+  fi
+  return 0
+}
+
 prompt_ready=0
 conflicts=()
 for relative_path in "${files[@]}"; do
@@ -134,7 +280,21 @@ for relative_path in "${files[@]}"; do
   destination_path="$TARGET_DIR/$relative_path"
   [[ -f "$source_path" ]] || { echo "ERROR: missing installer source file: $relative_path" >&2; exit 2; }
 
-  if [[ -e "$destination_path" ]]; then
+  if [[ -e "$destination_path" || -L "$destination_path" ]]; then
+    if [[ "$relative_path" == "AGENTS.md" ]]; then
+      if [[ -L "$destination_path" || ! -f "$destination_path" ]]; then
+        echo "PRESERVED existing non-regular or symlink file: AGENTS.md"
+        conflicts+=("$relative_path")
+      elif [[ "$source_path" -ef "$destination_path" ]] || cmp -s "$source_path" "$destination_path"; then
+        echo "UNCHANGED $relative_path"
+      elif prepare_managed_agents "$destination_path"; then
+        :
+      else
+        echo "PRESERVED existing file (managed routing not applied): AGENTS.md"
+        conflicts+=("$relative_path")
+      fi
+      continue
+    fi
     if [[ "$source_path" -ef "$destination_path" ]] || cmp -s "$source_path" "$destination_path"; then
       echo "UNCHANGED $relative_path"
       [[ "$relative_path" == "prompts/bootstrap-project.md" ]] && prompt_ready=1

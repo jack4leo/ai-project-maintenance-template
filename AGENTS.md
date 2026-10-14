@@ -23,4 +23,4 @@
 - 用 [`prompts/daily-review.md`](prompts/daily-review.md) 复盘每日提交；有证据的返工、错误合并或验证不足记入 `LESSONS.md`，做得好的验证也可记为 `Done right`。
 - Agent 负责维护 Lessons 和 `docs/code-standards.md` 的项目专属部分：遵循 `LESSONS.md` 的日期/证据格式与晋升门槛，不把一次性事件或猜测写成硬规则。
 - 产品方向、明确的维护者决定、安全例外、贡献者封禁、合并/发布权限等超出已授权范围的事项必须提交建议并停在决策点；不得自行逆转明确决定。
-- 目标项目若还没完成初始化，先执行 [`prompts/bootstrap-project.md`](prompts/bootstrap-project.md)，不允许照抄其他项目的技术规范。
+- 若 `.agent-maintenance/bootstrap-complete` 不存在，先完整执行 [`prompts/bootstrap-project.md`](prompts/bootstrap-project.md)；不允许照抄其他项目的技术规范。只有完成文档核查与验证后才创建该标记。

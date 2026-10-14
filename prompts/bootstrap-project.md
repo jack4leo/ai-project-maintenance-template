@@ -23,3 +23,7 @@ Read `AGENTS.md` first, then inspect this repository as an unfamiliar project. Y
 ## Validation and handoff
 
 Check every local Markdown link added or modified, ensure all cited paths exist, and re-run safe documented checks when practical. Review the resulting docs against the source rather than trusting your own summary. Report: files changed; verified commands and results; what remains `UNKNOWN`; decisions requiring an owner; and any source/CI gaps. Do not claim the project is fully bootstrapped if material boundaries or permissions remain unverified.
+
+## Completion marker
+
+Only after the discovery, documentation updates, link checks, and practical safe validations above are complete, create `.agent-maintenance/bootstrap-complete`. Record the completion date, the exact repository HEAD SHA reviewed, files initialized, validation actually run, and unresolved `UNKNOWN` items / owner decisions. A documented `UNKNOWN` is not itself a blocker; inability to inspect or validate a material area is. If the bootstrap is interrupted or materially incomplete, do not create the marker. If a marker already exists, verify it refers to the current project and is not stale before treating bootstrap as complete.

@@ -263,7 +263,14 @@ if hooks_enabled == "1":
         config = {}
         if os.path.lexists(filename):
             with open(filename, encoding="utf-8") as handle:
-                config = json.load(handle)
+                original = os.fstat(handle.fileno())
+                try:
+                    config = json.load(handle)
+                finally:
+                    os.utime(
+                        handle.fileno(),
+                        ns=(original.st_atime_ns, original.st_mtime_ns),
+                    )
         sessions = config.get("hooks", {}).get("SessionStart", [])
         already_registered = any(
             isinstance(session, dict)

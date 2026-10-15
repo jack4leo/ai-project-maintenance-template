@@ -313,7 +313,23 @@ record_change() {
   local index="${#rollback_paths[@]}"
   local backup="$work_dir/rollback-$index"
   if [[ -e "$path" || -L "$path" ]]; then
-    if ! cp -a -- "$path" "$backup"; then
+    if ! python3 - "$path" "$backup" <<'PY'
+import os
+import subprocess
+import sys
+
+source, backup = sys.argv[1:]
+original = os.stat(source, follow_symlinks=False)
+try:
+    subprocess.run(["cp", "-a", "--", source, backup], check=True)
+finally:
+    os.utime(
+        source,
+        ns=(original.st_atime_ns, original.st_mtime_ns),
+        follow_symlinks=False,
+    )
+PY
+    then
       echo "ERROR: could not safely snapshot $path before writing." >&2
       return 1
     fi

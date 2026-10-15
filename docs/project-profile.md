@@ -6,7 +6,7 @@
 
 - Project name / one-line purpose: `UNKNOWN`
 - Default branch: `UNKNOWN`
-- Documentation language: `English` (template default; during bootstrap, confirm the target repository's established language convention with its maintainers)
+- Documentation language: `UNKNOWN` (during bootstrap, verify the target repository's established language convention and confirm it with its maintainers)
 - Time zone (reviews and scheduling): `UNKNOWN`
 - Technology stack and supported platforms: `UNKNOWN`
 - Main runtime entry points and deployment form: `UNKNOWN`

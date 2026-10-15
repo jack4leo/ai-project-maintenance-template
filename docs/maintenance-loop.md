@@ -20,7 +20,7 @@ Read `docs/contributors.md` first for security and scope triage, then review the
 
 ## 4. Daily commit retrospective
 
-Each day, an agent authorized to read repository history and validation results reviews commits from after reviewed-through through the latest HEAD. Prioritize three categories: repeated rework, changes that should not have been merged/released, and insufficient validation; also record `Done right`. Every Lesson must have project evidence, a cause, and an executable rule; record events only and do not assume causation. Even when a review finds nothing, leave its scope and the new watermark.
+Each day, an agent authorized to read repository history and validation results reviews commits from after reviewed-through through the latest HEAD. Prioritize three categories: repeated rework, changes that should not have been merged/released, and insufficient validation; also record `Done right`. Every Lesson must be grounded in project evidence and include an executable rule. State a cause only when the evidence supports it. Otherwise, record the observed event and the specific open questions that must be answered to determine the cause; do not infer causation from timing or correlation alone. Even when a review finds nothing, leave its scope and the new watermark.
 
 Record distinct dates according to `LESSONS.md`. By default, promote the same lesson to a stable project-specific code-standards rule only after it appears on at least three independent review dates. A serious one-time risk may be proposed as a temporary rule, but mark it as pending owner confirmation. After promotion, retain source dates and evidence; do not delete the historical trail.
 

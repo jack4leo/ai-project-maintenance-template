@@ -10,7 +10,7 @@ This is the target project's living incident and learning log, not a collection 
 - Write rules as short, executable constraints for next time; include the incident cause, impact, fix/follow-up action, and evidence links. When evidence is insufficient, phrase it as an open question, not as a confirmed causal claim.
 - Count `Seen` by **distinct review dates** on which the lesson appeared. Multiple commits or repeated events on the same day count as one day; do not inflate the count through repeated edits or by splitting a review.
 - By default, only after a generalized stable rule has appeared independently in reviews on **at least 3 different dates** may it be promoted to the project-specific section of [`docs/code-standards.md`](docs/code-standards.md). During promotion, move the rule, scope, and evidence, and note the promotion here; do not lose the source.
-- A serious one-time security, data-loss, or release incident may immediately propose a temporary safeguard; clearly mark it `Temporary rule / pending maintainer confirmation`, do not present it as a three-day promotion, and do not expand it into an unapproved product policy.
+- For a serious one-time security, data-loss, or release incident, an agent may immediately propose a temporary safeguard. Mark the proposal `Temporary rule / pending maintainer confirmation`; this does not count as a three-day promotion or authorize an unapproved product policy.
 - After updating a rule, check AGENTS routing, relevant subsystem pages, tests, and other entry points for conflicts; keep one authoritative definition and do not duplicate it by copy-paste.
 - Even when nothing is found that day, state the review scope, sources checked, and “no new lessons”; then advance reviewed-through.
 

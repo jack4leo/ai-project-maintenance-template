@@ -1,60 +1,60 @@
 # Code standards
 
-本文定义所有项目都适用的最低审查标准，以及由 agent 根据**当前项目证据**持续维护的项目专属约定。两类规则必须分区；不得把模板占位符、另一个仓库的习惯或未验证假设当成本项目规则。
+This document defines the minimum review standards applicable to all projects, as well as project-specific conventions continuously maintained by the agent based on **current project evidence**. The two kinds of rules must remain in separate sections; do not treat template placeholders, another repository's habits, or unverified assumptions as this project's rules.
 
-## A. 通用基线（不因项目栈改变）
+## A. General baseline (does not change with the project stack)
 
-### 变更正确性
+### Change correctness
 
-- 先理解现有行为和单一权威来源，再改动；追踪完整入口、状态/数据流、错误路径和可观察副作用，并检查同类入口与兼容路径。
-- 改动应实现请求的最小必要范围。避免顺手重构、无关格式化和未要求的产品行为变化。
-- 修复缺陷时增加能表达外部行为的回归测试；在可行时确认测试在旧实现或移除修复后失败。若不能建立自动测试，记录具体原因及替代验证，不要把它写成已覆盖。
-- 验证契约，包括正常输入、边界/异常输入、状态持久化或重启、旧配置兼容和失败处理（按变更相关性选取）。
+- Understand existing behavior and the single source of truth before changing anything; trace the complete entry points, state/data flow, error paths, and observable side effects, and check analogous entry points and compatibility paths.
+- Keep changes to the minimum necessary scope of the request. Avoid opportunistic refactoring, unrelated formatting, and unrequested product behavior changes.
+- When fixing a defect, add a regression test that expresses externally observable behavior; where feasible, confirm that the test fails against the old implementation or when the fix is removed. If an automated test cannot be established, record the specific reason and alternative validation; do not describe it as covered.
+- Validate the contract, including normal inputs, boundary/exception inputs, state persistence or restart, compatibility with older configuration, and failure handling (as relevant to the change).
 
-### 数据、安全与兼容
+### Data, security, and compatibility
 
-- 不把秘密、用户数据或真实凭证写入测试夹具、日志、截图、提交或报表；对外部服务和破坏性操作使用隔离环境。
-- 配置/数据不可读不得误当成空配置并覆盖用户数据；有状态写入时优先保持已有原子性、回滚与恢复约定。
-- 明确变更是否影响接口、序列化格式、迁移、权限、身份验证、网络边界、可观测字段、依赖或发布产物；覆盖兼容行为和失败方式。
-- 重试、降级或 fallback 必须有明确触发条件、幂等/安全理由、顺序和终止条件；不要静默改变用户输入语义。
-- 日志和 trace 足以解释决策与错误，但应遵循最小化原则，不记录不必要的正文或敏感字段。
+- Do not put secrets, user data, or real credentials in test fixtures, logs, screenshots, commits, or reports; use isolated environments for external services and destructive operations.
+- Do not mistake unreadable configuration/data for empty configuration and overwrite user data; for stateful writes, prefer preserving existing atomicity, rollback, and recovery conventions.
+- Make clear whether the change affects interfaces, serialization formats, migrations, permissions, authentication, network boundaries, observability fields, dependencies, or release artifacts; cover compatible behavior and failure modes.
+- Retries, degradation, or fallback must have explicit trigger conditions, idempotency/safety rationale, ordering, and termination conditions; do not silently change the semantics of user input.
+- Logs and traces must be sufficient to explain decisions and errors, while following minimization principles and avoiding unnecessary content or sensitive fields.
 
-### 测试与审查
+### Testing and review
 
-- 使用项目实际的格式化、静态检查、定向测试和必要的全量测试；仅报告真实运行的命令与结果。
-- 测试输入应尽量保留真实请求、配置或磁盘格式的结构，并覆盖与变更相关的缺失值和边界值；夹具须去除秘密和真实个人数据。
-- 对重要缺陷修复，在可行时撤回修复、注入故障或破坏受保护行为，确认回归测试确实失败；说明无法进行该检查的限制，不把测试存在本身当作有效覆盖证明。
-- 清理测试启动的子进程、异步任务、临时目录、端口及其他资源；检查失败和取消路径也能结束或释放资源。
-- 按变更影响与项目支持范围选择平台、客户端和替代实现验证；明确列出未测的组合，不要求无关项目执行不存在的矩阵。
-- 同时检查实现、测试、文档、迁移/样例及相邻路径；保留重要兼容约束的验证。
-- 最终报告明确：已验证项、未验证项及理由、受影响子系统、审查的 commit SHA。未跑的检查不得写成通过。
-- 若验证期间代码 HEAD 变化，重新审查和验证最终 HEAD；合并前确认必需检查针对被审查的版本。
+- Use the project's actual formatter, static checks, targeted tests, and necessary full-suite tests; report only commands and results that were actually run.
+- Test inputs should preserve the structure of real requests, configuration, or disk formats as far as possible, and cover missing and boundary values relevant to the change; fixtures must remove secrets and real personal data.
+- For important defect fixes, where feasible revert the fix, inject a fault, or break the protected behavior to confirm that the regression test actually fails; explain limitations preventing this check, and do not treat the mere existence of a test as proof of effective coverage.
+- Clean up child processes, asynchronous tasks, temporary directories, ports, and other resources started by tests; check that failure and cancellation paths also terminate or release resources.
+- Select platform, client, and alternative-implementation validation according to the change's impact and the project's support scope; explicitly list untested combinations, and do not require unrelated projects to run a nonexistent matrix.
+- Check the implementation, tests, documentation, migrations/examples, and adjacent paths together; preserve validation of important compatibility constraints.
+- The final report must state clearly: validated items, unvalidated items and reasons, affected subsystems, and the reviewed commit SHA. Checks not run must not be described as passing.
+- If the code HEAD changes during validation, review and validate the final HEAD again; before merging, confirm that required checks target the version under review.
 
-## B. 项目专属标准（由 agent 持续维护）
+## B. Project-specific standards (continuously maintained by the agent)
 
-> Bootstrap 必须从项目源码、工具配置、CI、现有规则和真实复盘中完成本节；未知项标记 `UNKNOWN` 并附需要确认的问题，不得照搬模板例子。
+> Bootstrap must complete this section from the project's source code, tool configuration, CI, existing rules, and real retrospectives; mark unknowns as `UNKNOWN` and include questions requiring confirmation. Do not copy template examples.
 
-### 技术与仓库约定
+### Technology and repository conventions
 
-- 语言、框架、目录/模块约定：`BOOTSTRAP REQUIRED`
-- 格式化、lint、类型检查、构建命令：`BOOTSTRAP REQUIRED`
-- 依赖、代码生成、迁移、发布约定：`BOOTSTRAP REQUIRED`
+- Language, framework, and directory/module conventions: `BOOTSTRAP REQUIRED`
+- Formatting, linting, type checking, and build commands: `BOOTSTRAP REQUIRED`
+- Dependency, code-generation, migration, and release conventions: `BOOTSTRAP REQUIRED`
 
-### 验收与验证要求
+### Acceptance and validation requirements
 
-- 定向和全量测试命令（含工作目录、标签/参数）：`BOOTSTRAP REQUIRED`
-- CI 必需工作流及通过条件：`BOOTSTRAP REQUIRED`
-- 集成/真实环境测试、隔离方式和不可测试范围：`BOOTSTRAP REQUIRED`
-- 项目特有的正常、边界、失败、回滚、兼容性测试要求：`BOOTSTRAP REQUIRED`
+- Targeted and full test commands (including working directory and tags/arguments): `BOOTSTRAP REQUIRED`
+- Required CI workflows and passing conditions: `BOOTSTRAP REQUIRED`
+- Integration/real-environment tests, isolation method, and untestable scope: `BOOTSTRAP REQUIRED`
+- Project-specific normal, boundary, failure, rollback, and compatibility test requirements: `BOOTSTRAP REQUIRED`
 
-### 项目特有风险与稳定规则
+### Project-specific risks and stable rules
 
-- 敏感路径、凭证、个人信息和高风险操作：`BOOTSTRAP REQUIRED`
-- 已确认的设计/兼容决定及其出处：`BOOTSTRAP REQUIRED`
-- 经 Lessons 晋升的项目专属规则：`BOOTSTRAP REQUIRED`
+- Sensitive paths, credentials, personal information, and high-risk operations: `BOOTSTRAP REQUIRED`
+- Confirmed design/compatibility decisions and their sources: `BOOTSTRAP REQUIRED`
+- Project-specific rules promoted from Lessons: `BOOTSTRAP REQUIRED`
 
-## 维护本标准
+## Maintaining this standard
 
-- Agent 可以更新 B 节，使用 `LESSONS.md` 的证据和不同日期晋升规则；每条新增约定应写明适用范围和证据链接。
-- A 节是通用基线。若需要移除或放宽，先提出带风险解释的维护者决策，不得把一次局部例外悄悄扩展成默认。
-- 每当 CI、测试命令、工具链、架构或已批准的策略改变时，检查本节与 `docs/project-profile.md` 是否仍准确。
+- The agent may update section B using evidence from `LESSONS.md` and the distinct-date promotion rule; each new convention must state its scope and include an evidence link.
+- Section A is the general baseline. If removal or relaxation is needed, first propose a maintainer decision with a risk explanation; do not quietly expand a one-off local exception into a default.
+- Whenever CI, test commands, the toolchain, architecture, or an approved policy changes, check whether this section and `docs/project-profile.md` remain accurate.

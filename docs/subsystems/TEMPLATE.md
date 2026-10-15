@@ -1,35 +1,35 @@
-# <子系统名称>
+# <Subsystem Name>
 
-> 当前行为参考。最近核对：`<YYYY-MM-DD / commit SHA>`。本页来自源码、配置、测试和运行证据；未证实处标为 `UNKNOWN`。
+> Current behavior reference. Last checked: `<YYYY-MM-DD / commit SHA>`. This page is based on source code, configuration, tests, and runtime evidence; mark unverified items as `UNKNOWN`.
 
-## 职责与边界
+## Responsibilities and Boundaries
 
-说明这个子系统负责什么、明确不负责什么、与相邻子系统如何交接。边界按运行时职责定义，不假设等同某个目录。
+Describe what this subsystem is responsible for, what it explicitly does not handle, and how it hands off to adjacent subsystems. Define boundaries by runtime responsibility rather than assuming they correspond to a directory.
 
-## 权威来源
+## Authoritative Sources
 
-列出承载事实的代码路径、配置 schema / 数据源、公开接口、相关测试，并说明哪一处是 source of truth。给稳定的相对链接；避免把易变实现细节复制到多处。
+List the code paths, configuration schemas/data sources, public interfaces, and related tests that carry the facts, and state which one is the source of truth. Use stable relative links; avoid copying volatile implementation details into multiple places.
 
-## 主要运行路径
+## Primary Runtime Paths
 
-按请求或事件的先后顺序说明入口、解析、策略/校验、状态读取或写入、下游调用和可观察结果。遇到多条重要入口时分别描述；不可只画“正常路径”。
+Describe, in request or event order, the entry point, parsing, policy/validation, state reads or writes, downstream calls, and observable results. Describe multiple important entry points separately; do not show only the “happy path.”
 
-## 多实现 / 多入口（仅适用时）
+## Multiple Implementations / Entry Points (when applicable)
 
-当同一能力存在多个实现、入口或平台/客户端变体时，记录实际部署或运行时选择哪一条路径及其证据、各路径的 owner/交接点、已知行为差异，以及本次影响范围内如何检查彼此的 parity。按项目实际机制记录状态优先级、并发仲裁、恢复边界与资源清理；没有对应机制时不强行套用这些概念。若路径选择或差异尚未查明，标记 `UNKNOWN`。
+When the same capability has multiple implementations, entry points, or platform/client variants, record which path is selected in actual deployment or at runtime and the evidence for that choice, each path's owner/handoff point, known behavioral differences, and how parity is checked within the scope affected by this change. Record status precedence, concurrency arbitration, recovery boundaries, and resource cleanup according to the project's actual mechanisms; do not force these concepts into the document when no corresponding mechanism exists. If path selection or differences have not yet been established, mark them `UNKNOWN`.
 
-## 状态与数据契约
+## State and Data Contracts
 
-写明持久化状态、生命周期/缓存、关键转换、并发/锁/水位、序列化/API 契约和迁移方式（仅适用于本子系统）。区分事实、约定与推测。
+Document persistent state, lifecycle/caching, key transitions, concurrency/locks/watermarks, serialization/API contracts, and migration methods (only where applicable to this subsystem). Distinguish facts, conventions, and hypotheses.
 
-## 约束、失败与兼容性
+## Constraints, Failures, and Compatibility
 
-记录权限、安全边界、资源限制、错误分类、重试/fallback 条件、恢复行为及旧版本/平台/客户端兼容约束。说明哪些失败必须 fail closed、哪些会保留上一份有效状态。
+Record permissions, security boundaries, resource limits, error categories, retry/fallback conditions, recovery behavior, and compatibility constraints for older versions/platforms/clients. Explain which failures must fail closed and which retain the last valid state.
 
-## 验证证据
+## Verification Evidence
 
-列出源于项目真实配置的定向测试/检查和其覆盖的行为；指出尚未覆盖的风险及实测限制。不要编造不存在的测试命令。
+List targeted tests/checks based on the project's real configuration and the behavior they cover; identify risks not yet covered and limitations observed in practice. Do not invent test commands that do not exist.
 
-## 未知项与待确认
+## Unknowns and Pending Confirmation
 
-- `UNKNOWN`：<具体问题>；所需证据/维护者决定：<来源或 owner>
+- `UNKNOWN`: <specific question>; evidence or maintainer decision required: <source or owner>

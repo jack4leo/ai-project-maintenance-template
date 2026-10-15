@@ -61,7 +61,7 @@ If `.agent-maintenance/session-start.sh` already exists and differs when hooks a
 ## What the Startup Hooks Do
 
 - The Codex project hook is written to `.codex/hooks.json`; the Claude Code project hook is written to `.claude/settings.json`.
-- On every session start/resume/clear/compact/fork, the hook checks only `.agent-maintenance/bootstrap-complete`. If the marker is absent, it provides the agent context with an instruction to first read and execute `prompts/bootstrap-project.md`; if the marker exists, it remains quiet.
+- On every session start/resume/clear/compact/fork, the hook first checks whether `.agent-maintenance/bootstrap-complete` is non-empty; if so, it exits quietly. Otherwise, it requires `prompts/bootstrap-project.md` to exist. If the prompt file is missing, the script prints an error to stderr and exits with status 0 without injecting the bootstrap instruction. If the prompt file exists, it injects an instruction for the agent to read and execute it first.
 - The hook script does not start a sub-agent, execute the bootstrap prompt, inspect source code, write project documentation, or access the network. A startup hook can inject context but does not trigger a model turn by itself; interactive sessions usually require the user to send the first message. Therefore, to run the complete initialization now, explicitly use `--bootstrap codex|claude`.
 - Codex may require reviewing and trusting project hooks in `/hooks`; Claude Code may require the user to trust the project settings. Trust and confirmation are managed by each CLI, and the installer does not attempt to bypass them.
 

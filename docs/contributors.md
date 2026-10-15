@@ -22,4 +22,4 @@ Be especially cautious when inspecting `.github/workflows/`, build/install scrip
 - Which issues require escalation and who decides: `BOOTSTRAP REQUIRED`
 - Boundaries for agents to comment, submit fixes, or create PRs: `BOOTSTRAP REQUIRED`
 
-Do not infer malicious intent or automatically reject based on the identity of an “external contributor”; nor replace the result of a security review with a personal judgment about the author. Any rule based on a contributor list, trust status, or rejection policy must have an explicit project policy and maintainer authorization.
+Do not infer malicious intent or automatically reject based on the identity of an “external contributor”; nor replace the result of a security review with the author's personal judgment. Any rule based on a contributor list, trust status, or rejection policy must have an explicit project policy and maintainer authorization.

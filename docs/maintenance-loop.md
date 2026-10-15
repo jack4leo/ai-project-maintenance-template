@@ -1,6 +1,6 @@
 # Project maintenance loop
 
-This mechanism centers on “read project memory for every change, update project memory for every review.” `AGENTS.md` handles routing; `docs/subsystems/` records current system facts; `docs/code-standards.md` stores general and promoted stable rules; `LESSONS.md` stores recent evidence-backed lessons. They link to one another without redefining the same content.
+This mechanism centers on “read project memory for every change, update project memory for every retrospective.” `AGENTS.md` handles routing; `docs/subsystems/` records current system facts; `docs/code-standards.md` stores general and promoted stable rules; `LESSONS.md` stores recent evidence-backed lessons. They link to one another without redefining the same content.
 
 ## 1. One-time initialization (Bootstrap)
 

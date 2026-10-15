@@ -16,7 +16,7 @@ This is a routing table, not a project encyclopedia. Keep rules and facts in the
 - Add regression verification that expresses user behavior for bug fixes; where feasible, demonstrate that the test fails on the old/broken implementation. Do not describe compilation failures or skipped tests as verified behavior.
 - Verify with the real commands in the project profile. Report exactly what was run, the results, the commit/worktree version, and any checks not run with the reasons.
 - Do not claim to have run tests against real services, platforms, or devices; when verification is unavailable, state the limitation and avoid promising unverified behavior as usable.
-- At completion, check related documentation, adjacent implementations, configuration migrations, and tests; PR/commit descriptions should cite the exact HEAD reviewed.
+- At completion, check related documentation, adjacent implementations, configuration migrations, and tests; PR/commit descriptions must cite the exact HEAD reviewed.
 
 ## Ongoing Maintenance
 

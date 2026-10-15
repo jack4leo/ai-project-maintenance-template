@@ -114,6 +114,12 @@ while IFS= read -r -d '' source_path; do
   files+=("${source_path#"$SOURCE_DIR"/}")
 done < <(find "$SOURCE_DIR/docs" "$SOURCE_DIR/prompts" -type f \
   ! -path "$SOURCE_DIR/docs/source-and-extraction.md" -print0)
+for relative_path in "${files[@]}"; do
+  [[ -f "$SOURCE_DIR/$relative_path" ]] || {
+    echo "ERROR: missing installer source file: $relative_path" >&2
+    exit 2
+  }
+done
 
 validate_destination_parents() {
   local relative_path="$1"
@@ -215,8 +221,162 @@ if [[ "$INSTALL_HOOKS" == 1 ]]; then
   fi
 fi
 
+# Detect predictable destination permission failures before writing any template
+# files or provider settings. This checks only paths that would actually change.
+preflight_write_access() {
+  python3 - "$SOURCE_DIR" "$TARGET_DIR" "$INSTALL_HOOKS" "${files[@]}" <<'PY'
+import filecmp
+import json
+import os
+import stat
+import sys
+
+source_dir, target_dir, hooks_enabled, *relative_files = sys.argv[1:]
+needed_directories = set()
+
+def needs_managed_agents_write(source, destination):
+    try:
+        info = os.lstat(destination)
+    except FileNotFoundError:
+        return False
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
+        return False
+    return not filecmp.cmp(source, destination, shallow=False)
+
+for relative in relative_files:
+    destination = os.path.join(target_dir, relative)
+    if os.path.lexists(destination):
+        if relative == "AGENTS.md" and needs_managed_agents_write(
+            os.path.join(source_dir, relative), destination
+        ):
+            needed_directories.add(os.path.dirname(destination))
+        continue
+    needed_directories.add(os.path.dirname(destination))
+
+if hooks_enabled == "1":
+    hook_commands = {
+        ".codex/hooks.json": 'bash "$(git rev-parse --show-toplevel)/.agent-maintenance/session-start.sh" codex',
+        ".claude/settings.json": 'bash "${CLAUDE_PROJECT_DIR}/.agent-maintenance/session-start.sh" claude',
+    }
+    for relative, command in hook_commands.items():
+        filename = os.path.join(target_dir, relative)
+        config = {}
+        if os.path.lexists(filename):
+            with open(filename, encoding="utf-8") as handle:
+                config = json.load(handle)
+        sessions = config.get("hooks", {}).get("SessionStart", [])
+        already_registered = any(
+            isinstance(session, dict)
+            and any(
+                isinstance(handler, dict) and handler.get("command") == command
+                for handler in session.get("hooks", [])
+            )
+            for session in sessions
+        )
+        if not already_registered:
+            needed_directories.add(os.path.dirname(filename))
+
+for directory in sorted(needed_directories):
+    candidate = directory
+    while not os.path.lexists(candidate):
+        parent = os.path.dirname(candidate)
+        if parent == candidate:
+            break
+        candidate = parent
+    try:
+        info = os.lstat(candidate)
+        if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+            raise OSError("nearest existing parent is not a real directory")
+        if not os.access(candidate, os.W_OK | os.X_OK):
+            raise PermissionError("directory is not writable and searchable")
+    except OSError as exc:
+        relative = os.path.relpath(directory, target_dir)
+        print(
+            f"ERROR: destination directory is not writable ({relative}): {exc}; no files were installed.",
+            file=sys.stderr,
+        )
+        sys.exit(3)
+PY
+}
+
+preflight_write_access
+
 work_dir="$(mktemp -d)"
-trap 'rm -rf "$work_dir"' EXIT
+rollback_paths=()
+rollback_backups=()
+rollback_existed=()
+created_directories=()
+transaction_active=1
+
+record_change() {
+  local path="$1"
+  local index="${#rollback_paths[@]}"
+  local backup="$work_dir/rollback-$index"
+  if [[ -e "$path" || -L "$path" ]]; then
+    if ! cp -a -- "$path" "$backup"; then
+      echo "ERROR: could not safely snapshot $path before writing." >&2
+      return 1
+    fi
+    rollback_existed+=(1)
+  else
+    rollback_existed+=(0)
+  fi
+  rollback_paths+=("$path")
+  rollback_backups+=("$backup")
+}
+
+record_missing_parent_directories() {
+  local directory="$1"
+  while [[ "$directory" != "$TARGET_DIR" && "$directory" != "/" \
+      && ! -e "$directory" && ! -L "$directory" ]]; do
+    created_directories+=("$directory")
+    directory="$(dirname "$directory")"
+  done
+}
+
+rollback_transaction() {
+  local index path backup parent temporary status=0
+  for ((index=${#rollback_paths[@]} - 1; index >= 0; index--)); do
+    path="${rollback_paths[index]}"
+    backup="${rollback_backups[index]}"
+    if [[ "${rollback_existed[index]}" == 1 ]]; then
+      if [[ -f "$path" ]] && cmp -s -- "$backup" "$path"; then
+        continue
+      fi
+      parent="$(dirname "$path")"
+      temporary="$(mktemp "$parent/.$(basename "$path").rollback.XXXXXX")" || {
+        echo "ERROR: rollback could not stage the original file for $path." >&2
+        status=1
+        continue
+      }
+      if ! cp -a -- "$backup" "$temporary" || ! mv -f -- "$temporary" "$path"; then
+        rm -f -- "$temporary"
+        echo "ERROR: rollback could not restore the original file $path." >&2
+        status=1
+      fi
+    elif ! rm -f -- "$path"; then
+      echo "ERROR: rollback could not remove newly installed file $path." >&2
+      status=1
+    fi
+  done
+  for ((index=${#created_directories[@]} - 1; index >= 0; index--)); do
+    rmdir -- "${created_directories[index]}" 2>/dev/null || true
+  done
+  return "$status"
+}
+
+installer_cleanup() {
+  local status=$?
+  trap - EXIT
+  if ((status != 0 && transaction_active)); then
+    echo "ERROR: installation write failed; attempting to roll back this install." >&2
+    rollback_transaction || echo "ERROR: rollback was incomplete; inspect the listed paths before retrying." >&2
+  fi
+  rm -rf -- "$work_dir"
+  exit "$status"
+}
+
+trap installer_cleanup EXIT
 managed_route_file="$work_dir/agents-routing.md"
 cat > "$managed_route_file" <<'ROUTE'
 <!-- BEGIN SELF-EVOLUTION-FLYWHEEL MANAGED ROUTING -->
@@ -449,6 +609,11 @@ PY
     rm -f "$stage_file"
     return 1
   fi
+  if ! record_change "$destination_path"; then
+    echo "PRESERVED AGENTS.md: could not snapshot the original file for rollback." >&2
+    rm -f "$stage_file"
+    return 1
+  fi
   if ! mv -f "$stage_file" "$destination_path"; then
     echo "PRESERVED AGENTS.md: could not apply the confirmed managed routing change." >&2
     rm -f "$stage_file"
@@ -499,7 +664,9 @@ for relative_path in "${files[@]}"; do
     continue
   fi
 
+  record_missing_parent_directories "$(dirname "$destination_path")"
   mkdir -p "$(dirname "$destination_path")"
+  record_change "$destination_path"
   cp -p "$source_path" "$destination_path"
   echo "INSTALLED $relative_path"
   [[ "$relative_path" == "prompts/bootstrap-project.md" ]] && prompt_ready=1
@@ -632,9 +799,17 @@ PY
 }
 
 if [[ "$INSTALL_HOOKS" == 1 ]]; then
+  for settings_path in "$TARGET_DIR/.codex/hooks.json" "$TARGET_DIR/.claude/settings.json"; do
+    record_missing_parent_directories "$(dirname "$settings_path")"
+    record_change "$settings_path"
+  done
   merge_hook_config codex "$TARGET_DIR/.codex/hooks.json"
   merge_hook_config claude "$TARGET_DIR/.claude/settings.json"
 fi
+
+# All file and provider writes succeeded. Later notices, optional bootstrap launch,
+# or a confirmation-incomplete exit must not undo an otherwise completed install.
+transaction_active=0
 
 if ((${#conflicts[@]})); then
   echo

@@ -99,6 +99,124 @@ cmp -s "$TMP_DIR/claude-before-invalid.json" "$invalid_claude_target/.claude/set
 grep -Fq 'no files were installed' "$TMP_DIR/invalid-claude.log" \
   || fail "cross-provider preflight failure was not reported"
 
+# A read-only later-provider directory must be rejected before any project file
+# or earlier-provider setting is written. Run as an unprivileged user even when
+# the suite itself is invoked as root so the permission state matches real use.
+readonly_claude_target="$TMP_DIR/readonly-claude-target"
+init_git_target "$readonly_claude_target"
+mkdir -p "$readonly_claude_target/.codex" "$readonly_claude_target/.claude"
+printf '{"hooks":{},"keep":"codex"}\n' > "$readonly_claude_target/.codex/hooks.json"
+printf '{"hooks":{},"keep":"claude"}\n' > "$readonly_claude_target/.claude/settings.json"
+cp "$readonly_claude_target/.codex/hooks.json" "$TMP_DIR/readonly-codex-before.json"
+cp "$readonly_claude_target/.claude/settings.json" "$TMP_DIR/readonly-claude-before.json"
+chmod 555 "$readonly_claude_target/.claude"
+python3 - "$REPO_ROOT/install.sh" "$readonly_claude_target" "$TMP_DIR/readonly-claude.log" "$TMP_DIR" <<'PY'
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+installer, target, output_path, temp_root = sys.argv[1:]
+if os.geteuid() == 0:
+    os.chmod(temp_root, 0o755)
+    for path in Path(target).rglob("*"):
+        os.chown(path, 65534, 65534, follow_symlinks=False)
+    os.chown(target, 65534, 65534)
+
+def drop_privileges():
+    os.setgroups([])
+    os.setgid(65534)
+    os.setuid(65534)
+
+with Path(output_path).open("wb") as output:
+    result = subprocess.run(
+        ["bash", installer, "--target", target],
+        stdout=output,
+        stderr=subprocess.STDOUT,
+        preexec_fn=drop_privileges if os.geteuid() == 0 else None,
+    )
+if result.returncode == 0:
+    raise SystemExit("installer accepted a read-only Claude settings directory")
+PY
+chmod 755 "$readonly_claude_target/.claude"
+[[ ! -e "$readonly_claude_target/AGENTS.md" ]] \
+  || fail "read-only Claude target left template files installed"
+cmp -s "$TMP_DIR/readonly-codex-before.json" "$readonly_claude_target/.codex/hooks.json" \
+  || fail "read-only Claude target changed Codex hook settings"
+cmp -s "$TMP_DIR/readonly-claude-before.json" "$readonly_claude_target/.claude/settings.json" \
+  || fail "read-only Claude target changed Claude settings"
+grep -Fq 'no files were installed' "$TMP_DIR/readonly-claude.log" \
+  || fail "read-only Claude preflight failure was not reported before installation"
+
+# Simulate a permission change after preflight but immediately before the Claude
+# atomic replacement. Earlier template and Codex writes must be rolled back.
+rollback_target="$TMP_DIR/rollback-target"
+init_git_target "$rollback_target"
+mkdir -p "$rollback_target/.codex" "$rollback_target/.claude"
+printf '{"hooks":{},"keep":"codex"}\n' > "$rollback_target/.codex/hooks.json"
+printf '{"hooks":{},"keep":"claude"}\n' > "$rollback_target/.claude/settings.json"
+cp "$rollback_target/.codex/hooks.json" "$TMP_DIR/rollback-codex-before.json"
+cp "$rollback_target/.claude/settings.json" "$TMP_DIR/rollback-claude-before.json"
+rollback_python_bin="$TMP_DIR/rollback-python-bin"
+mkdir -p "$rollback_python_bin"
+real_python3="$(command -v python3)"
+cat > "$rollback_python_bin/python3" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+script="$(cat)"
+if [[ "${2:-}" == "claude" && "$script" == *'provider, filename = sys.argv[1], Path(sys.argv[2])'* ]]; then
+  chmod 555 "$TEST_CLAUDE_DIR"
+fi
+printf '%s' "$script" | "$TEST_REAL_PYTHON3" "$@"
+SH
+chmod +x "$rollback_python_bin/python3"
+python3 - "$REPO_ROOT/install.sh" "$rollback_target" "$TMP_DIR/rollback.log" "$TMP_DIR" "$rollback_python_bin" "$real_python3" <<'PY'
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+installer, target, output_path, temp_root, mock_bin, real_python = sys.argv[1:]
+if os.geteuid() == 0:
+    os.chmod(temp_root, 0o755)
+    for root in (Path(target), Path(mock_bin)):
+        for path in root.rglob("*"):
+            os.chown(path, 65534, 65534, follow_symlinks=False)
+        os.chown(root, 65534, 65534)
+
+def drop_privileges():
+    os.setgroups([])
+    os.setgid(65534)
+    os.setuid(65534)
+
+environment = os.environ.copy()
+environment["PATH"] = mock_bin + os.pathsep + environment["PATH"]
+environment["TEST_CLAUDE_DIR"] = str(Path(target) / ".claude")
+environment["TEST_REAL_PYTHON3"] = real_python
+with Path(output_path).open("wb") as output:
+    result = subprocess.run(
+        ["bash", installer, "--target", target],
+        stdout=output,
+        stderr=subprocess.STDOUT,
+        env=environment,
+        preexec_fn=drop_privileges if os.geteuid() == 0 else None,
+    )
+if result.returncode == 0:
+    raise SystemExit("injected Claude settings write failure unexpectedly succeeded")
+PY
+chmod 755 "$rollback_target/.claude"
+[[ ! -e "$rollback_target/AGENTS.md" && ! -e "$rollback_target/prompts/bootstrap-project.md" ]] \
+  || fail "mid-install Claude write failure left template files behind"
+cmp -s "$TMP_DIR/rollback-codex-before.json" "$rollback_target/.codex/hooks.json" \
+  || fail "mid-install Claude write failure did not restore Codex settings"
+cmp -s "$TMP_DIR/rollback-claude-before.json" "$rollback_target/.claude/settings.json" \
+  || fail "mid-install Claude write failure changed Claude settings"
+grep -Fq 'attempting to roll back this install' "$TMP_DIR/rollback.log" \
+  || fail "mid-install write failure did not report rollback"
+if grep -Fq 'rollback was incomplete' "$TMP_DIR/rollback.log"; then
+  fail "mid-install rollback reported incomplete restoration"
+fi
+
 # Existing destination parents must be real directories, not symlinks outside the project.
 symlink_parent_target="$TMP_DIR/symlink-parent-target"
 symlink_parent_outside="$TMP_DIR/symlink-parent-outside"

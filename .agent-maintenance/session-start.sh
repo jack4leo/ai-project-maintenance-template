@@ -16,7 +16,7 @@ if [[ -s "$MARKER" ]]; then
 fi
 
 if [[ ! -f "$BOOTSTRAP_PROMPT" ]]; then
-  printf '%s\n' "Self-Evolution Flywheel: prompts/bootstrap-project.md is missing; cannot bootstrap." >&2
+  printf '%s\n' "Self-Evolution Flywheel: prompts/bootstrap-project.md is missing; cannot bootstrap."
   exit 0
 fi
 

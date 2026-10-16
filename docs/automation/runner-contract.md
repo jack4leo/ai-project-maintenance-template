@@ -16,7 +16,7 @@ The range freezer reads only:
 
 `LESSONS.md` is the sole watermark authority. `docs/project-profile.md` may configure the archive location, but it is not a second watermark store. The marker must occur exactly once and contain a non-empty, full-length hexadecimal commit object ID for this repository's object format. `UNKNOWN`, a missing/duplicate marker, an abbreviated or malformed ID, an ID that does not resolve to a commit, missing required objects, shallow or otherwise incomplete history, or a watermark that is not an ancestor of `HEAD` is a hard failure. Do not guess, bootstrap, fetch, repair, or advance the watermark. In particular, a rebase/force-push that makes the watermark non-ancestral requires explicit recovery outside this stage. Replacement refs or grafts must not be allowed to redefine ancestry.
 
-The lower boundary `from` is the reviewed-through watermark and is **exclusive**. `through` is the full object ID of the `HEAD` observed during freezing and is **inclusive**. The commit list contains every commit reachable from `through` but not from `from`. If `from == through`, the list is empty. The freezer validates that the traversed history and objects needed to classify the range are present; it must fail closed rather than emit a partial range.
+The lower boundary `from` is the reviewed-through watermark and is **exclusive**. `through` is the full object ID of the `HEAD` observed during freezing and is **inclusive**. The commit list contains every commit reachable from `through` but not from `from`. If `from == through`, the list is empty. The freezer validates connectivity and verifies the content hash of every reachable Git object, not just that an object with the expected name exists. It must fail closed rather than emit a partial or hash-unverified range.
 
 ### Commit order and path exclusions
 
@@ -38,7 +38,7 @@ The range key is `sha256:<lowercase hex>` over the canonical UTF-8 JSON serializ
 
 ### Side-effect boundary and retry behavior
 
-This stage is strictly read-only. It must not write `LESSONS.md`, create or update anything under `docs/reviews/`, create archives, or advance any watermark. It must not fetch or repair history. Preserve atime for files read directly where the platform permits (use `O_NOATIME` where available); set Git to avoid optional locks and lazy fetching. A failed validation emits a non-zero result and no successful manifest. Re-running with the same `from`, `through`, history, and committed policy produces the same manifest and key. If `HEAD` advances, that is a new range and key; never overwrite or reinterpret a previously frozen manifest as the newer range.
+This stage is strictly read-only. It must not write `LESSONS.md`, create or update anything under `docs/reviews/`, create archives, or advance any watermark. It must not fetch or repair history. Preserve atime for every file read where the platform permits: use `O_NOATIME` for direct worktree reads and verify that Git history reads preserve it for both loose and packed object stores. Set Git to avoid optional locks and lazy fetching. A failed validation emits a non-zero result and no successful manifest. Re-running with the same `from`, `through`, history, and committed policy produces the same manifest and key. If `HEAD` advances, that is a new range and key; never overwrite or reinterpret a previously frozen manifest as the newer range.
 
 ## Stage 2: future review/write consumer (not implemented by the range freezer)
 

@@ -161,7 +161,7 @@ class InstallerSecurityRegressionTests(unittest.TestCase):
                 text=True,
                 timeout=15,
             )
-            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.returncode, 1, result.stderr)
             self.assertIn("symbolic link", result.stdout)
             self.assertNotIn("read and execute prompts/bootstrap-project.md", result.stdout)
             self.assertNotIn("untrusted external instructions", result.stdout)
@@ -177,12 +177,23 @@ class InstallerSecurityRegressionTests(unittest.TestCase):
         )
         readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
         docs = (REPO_ROOT / "docs/installation.md").read_text(encoding="utf-8")
-        self.assertIn("must be merged manually", help_result.stdout)
-        self.assertIn("adding a hook to a pre-existing JSON file requires a manual merge", help_result.stdout)
+        help_text = " ".join(help_result.stdout.split())
+        self.assertIn("must be merged manually", help_text)
+        self.assertIn("if an existing settings file needs a hook added, hook registration is skipped", help_text)
         self.assertIn("never automatically replaced", readme)
-        self.assertIn("requires a manual merge", readme)
+        self.assertIn("merge the reviewed block manually", readme)
+        self.assertIn("hook registration is skipped", readme)
         self.assertIn("prints a diagnostic to stdout", docs)
         self.assertNotIn("prints an error to stderr", docs)
+
+    def test_reviewed_through_has_one_authoritative_location(self) -> None:
+        lessons = (REPO_ROOT / "LESSONS.md").read_text(encoding="utf-8")
+        profile = (REPO_ROOT / "docs/project-profile.md").read_text(encoding="utf-8")
+        runner = (REPO_ROOT / "docs/automation/runner-contract.md").read_text(encoding="utf-8")
+        self.assertIn("reviewed-through:", lessons.splitlines()[0])
+        self.assertIn("single marker at the top of [`LESSONS.md`]", profile)
+        self.assertNotIn("SHA reviewed through in the most recent completed review", profile)
+        self.assertIn("not a second watermark store", runner)
 
 
 class mock_os_rmdir:

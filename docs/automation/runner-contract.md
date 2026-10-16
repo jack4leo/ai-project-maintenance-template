@@ -4,7 +4,7 @@ This is an adapter contract for any authorized scheduled agent. It is intentiona
 
 ## Required inputs
 
-The runner needs a repository checkout, project timezone, default branch, the last **successfully reviewed** commit SHA, current HEAD, this repository's `AGENTS.md`, `LESSONS.md`, `docs/project-profile.md`, `docs/code-standards.md`, `docs/subsystems/README.md`, and the review prompt. If PR/CI metadata is used, it must be read-only and scoped to this repository.
+The runner needs a repository checkout, project timezone, default branch, the last **successfully reviewed** commit SHA from the single reviewed-through marker at the top of `LESSONS.md`, current HEAD, this repository's `AGENTS.md`, `LESSONS.md`, `docs/project-profile.md`, `docs/code-standards.md`, `docs/subsystems/README.md`, and the review prompt. `docs/project-profile.md` configures the archive location and recovery policy; it is not a second watermark store. If PR/CI metadata is used, it must be read-only and scoped to this repository.
 
 The run records both boundary SHAs and the time of collection. If the previous SHA is missing, not an ancestor of HEAD, the branch was rewritten, history is shallow, or the intended range cannot be proven complete, do not silently move the watermark: report the gap and ask for recovery instructions. Handle merge commits and amended/rebased history according to a project policy recorded in `project-profile.md`.
 

@@ -1,6 +1,6 @@
 # Daily review of project changes
 
-Follow `AGENTS.md` and `docs/automation/runner-contract.md`. Review the verified range from the last successful `reviewed-through` SHA up to the collected HEAD. Read project profile, Lessons, project code standards, subsystem index and relevant subsystem pages. If the range is incomplete or ambiguous, stop and report the gap without advancing the watermark.
+Follow `AGENTS.md` and `docs/automation/runner-contract.md`. Read the sole last-successful `reviewed-through` SHA from the marker at the top of `LESSONS.md`, then review that verified range up to the collected HEAD. Read project profile, Lessons, project code standards, subsystem index and relevant subsystem pages. If the range is incomplete or ambiguous, stop and report the gap without advancing the watermark.
 
 For each commit and its relevant context, look for:
 

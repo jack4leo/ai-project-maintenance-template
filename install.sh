@@ -26,10 +26,11 @@ Usage: ./install.sh [--target DIR] [--no-hooks] [--bootstrap codex|claude]
 
 Install Self-Evolution Flywheel project guidance into an existing repository.
 Existing files are never overwritten. A different AGENTS.md is shown as a
-proposed diff but must be merged manually. Existing provider JSON is never
-rewritten: exact hooks are accepted, missing settings files are created, and
-adding a hook to a pre-existing JSON file requires a manual merge.
-Invalid settings are left untouched and cause an error.
+proposed diff and must be merged manually; the installer does not ask for
+confirmation when it cannot safely apply the change. Existing provider JSON is
+never rewritten: exact hooks are accepted, missing settings files are created,
+and if an existing settings file needs a hook added, hook registration is
+skipped while the other template files are still installed.
 
 Options:
   --target DIR              Destination project root (default: current directory)
@@ -287,18 +288,42 @@ registered = any(
 )
 if os.path.lexists(filename) and not registered:
     print(
-        f"ERROR: cannot safely merge into pre-existing {filename}: POSIX has no portable conditional replace for non-cooperative writers; file preserved. Add the hook manually or use --no-hooks; no files were installed.",
+        f"NOTICE: existing {filename} needs a manual hook merge; it was preserved and startup-hook registration is skipped. Template files will still be installed.",
         file=sys.stderr,
     )
-    sys.exit(3)
+    sys.exit(11)
 PY
 }
 
-# Validate both providers before installing any template files or changing either
-# provider's settings, so a later-provider parse/schema error cannot leave a partial install.
+# Validate provider settings before installing any template files. A valid
+# pre-existing settings file that needs a manual merge disables hook registration
+# for this run, but does not block independent template-file installation.
+hook_config_conflict=0
 if [[ "$INSTALL_HOOKS" == 1 ]]; then
-  preflight_hook_config codex "$TARGET_DIR/.codex/hooks.json"
-  preflight_hook_config claude "$TARGET_DIR/.claude/settings.json"
+  if preflight_hook_config codex "$TARGET_DIR/.codex/hooks.json"; then
+    :
+  else
+    preflight_status=$?
+    if ((preflight_status == 11)); then
+      INSTALL_HOOKS=0
+      hook_config_conflict=1
+    else
+      exit "$preflight_status"
+    fi
+  fi
+  if [[ "$INSTALL_HOOKS" == 1 ]]; then
+    if preflight_hook_config claude "$TARGET_DIR/.claude/settings.json"; then
+      :
+    else
+      preflight_status=$?
+      if ((preflight_status == 11)); then
+        INSTALL_HOOKS=0
+        hook_config_conflict=1
+      else
+        exit "$preflight_status"
+      fi
+    fi
+  fi
 fi
 
 # Never register hooks against a pre-existing project script with different
@@ -531,7 +556,7 @@ PY
 prepare_managed_agents() {
   local destination_path="$1"
   local baseline="$work_dir/agents.original"
-  local stage_file action_file action prompt answer diff_status=0
+  local stage_file diff_status=0
 
   if ! command -v python3 >/dev/null 2>&1; then
     echo "PRESERVED existing file (Python 3 is required to safely manage AGENTS.md): AGENTS.md" >&2
@@ -542,12 +567,11 @@ prepare_managed_agents() {
     return 1
   fi
   stage_file="$(mktemp "$work_dir/agents-stage.XXXXXX")"
-  action_file="$work_dir/agents-action"
-  if ! python3 - "$baseline" "$managed_route_file" "$stage_file" "$action_file" <<'PY'
+  if ! python3 - "$baseline" "$managed_route_file" "$stage_file" <<'PY'
 import sys
 from pathlib import Path
 
-source, route_path, stage_path, action_path = map(Path, sys.argv[1:])
+source, route_path, stage_path = map(Path, sys.argv[1:])
 begin = "<!-- BEGIN SELF-EVOLUTION-FLYWHEEL MANAGED ROUTING -->"
 end = "<!-- END SELF-EVOLUTION-FLYWHEEL MANAGED ROUTING -->"
 
@@ -568,13 +592,11 @@ end_positions = [i for i, line in enumerate(markers) if line == end]
 
 if not begin_positions and not end_positions:
     updated = route + newline + text
-    action = "insert"
 elif len(begin_positions) == 1 and len(end_positions) == 1 and begin_positions[0] < end_positions[0]:
     first, last = begin_positions[0], end_positions[0]
     prefix = "".join(lines[:first])
     suffix = "".join(lines[last + 1 :])
     updated = prefix + route + suffix
-    action = "update"
 else:
     print("ERROR: AGENTS.md has missing, duplicated, or out-of-order managed routing markers; left unchanged.", file=sys.stderr)
     sys.exit(3)
@@ -582,7 +604,6 @@ else:
 try:
     with stage_path.open("w", encoding="utf-8", newline="") as handle:
         handle.write(updated)
-    action_path.write_text(action + "\n", encoding="utf-8")
 except OSError as exc:
     print(f"ERROR: cannot stage managed routing for AGENTS.md: {exc}; left unchanged.", file=sys.stderr)
     sys.exit(3)
@@ -592,7 +613,6 @@ PY
     return 1
   fi
 
-  action="$(cat "$action_file")"
   if cmp -s "$baseline" "$stage_file"; then
     rm -f "$stage_file"
     echo "UNCHANGED managed routing block in AGENTS.md"
@@ -607,50 +627,13 @@ PY
     return 1
   fi
 
-  if [[ "$action" == "insert" ]]; then
-    prompt="Insert the managed routing block at the beginning of AGENTS.md? [y/N] "
-  else
-    prompt="Update the existing managed routing block in AGENTS.md? [y/N] "
-  fi
-  if ! exec 3<>/dev/tty 2>/dev/null; then
-    echo "PRESERVED AGENTS.md: explicit confirmation requires a controlling terminal." >&2
-    rm -f "$stage_file"
-    return 2
-  fi
-  if [[ ! -t 1 ]]; then
-    display_managed_diff "$baseline" "$stage_file" >&3 || diff_status=$?
-    if ((diff_status > 1)); then
-      echo "PRESERVED existing file (could not display the proposed diff on the controlling terminal): AGENTS.md" >&2
-      rm -f "$stage_file"
-      exec 3>&-
-      return 1
-    fi
-  fi
-  printf '%s' "$prompt" >&3
-  IFS= read -r answer <&3 || answer=""
-  exec 3>&-
-  case "$answer" in
-    y|Y|yes|YES|Yes) ;;
-    *)
-      echo "PRESERVED AGENTS.md: managed routing change was not confirmed."
-      rm -f "$stage_file"
-      return 1
-      ;;
-  esac
-
-  if ! cmp -s "$baseline" "$destination_path"; then
-    echo "PRESERVED AGENTS.md: the file changed while awaiting confirmation; review and retry." >&2
-    rm -f "$stage_file"
-    return 1
-  fi
-  echo "PRESERVED AGENTS.md: safe automatic replacement is unavailable for non-cooperative writers; merge the reviewed block manually." >&2
+  echo "PRESERVED AGENTS.md: automatic replacement is unavailable; merge the reviewed block manually." >&2
   rm -f "$stage_file"
   return 3
 }
 
 prompt_ready=0
 conflicts=()
-confirmation_required=0
 manual_merge_required=0
 for relative_path in "${files[@]}"; do
   source_path="$SOURCE_DIR/$relative_path"
@@ -670,9 +653,7 @@ for relative_path in "${files[@]}"; do
         managed_status=$?
         echo "PRESERVED existing file (managed routing not applied): AGENTS.md"
         conflicts+=("$relative_path")
-        if ((managed_status == 2)); then
-          confirmation_required=1
-        elif ((managed_status == 3)); then
+        if ((managed_status == 3)); then
           manual_merge_required=1
         fi
       fi
@@ -718,7 +699,7 @@ if [[ "$INSTALL_HOOKS" == 1 ]]; then
 fi
 
 # All file and provider writes succeeded. Later notices, optional bootstrap launch,
-# or a confirmation-incomplete exit must not undo an otherwise completed install.
+# or a manual-merge exit must not undo an otherwise completed install.
 transaction_active=0
 
 if ((${#conflicts[@]})); then
@@ -731,19 +712,19 @@ if [[ "$INSTALL_HOOKS" == 1 ]]; then
   cat <<'NOTICE'
 
 Startup hooks are registered in project-local settings. They only check for
-.agent-maintenance/bootstrap-complete and print a short instruction; they do not
-run shell commands from the project or fetch network content. Codex/Claude Code
-may require you to review/trust the project hook before it runs. See docs/installation.md.
+.agent-maintenance/bootstrap-complete and required project documents, then print
+a reminder; they do not run bootstrap, start a model, or fetch network content.
+Codex/Claude Code may require you to review/trust the project hook before it
+runs. See docs/installation.md.
 NOTICE
+fi
+
+if ((hook_config_conflict)); then
+  echo "NOTICE: template files were installed, but startup hooks were not registered because an existing provider settings file needs a manual merge."
 fi
 
 if ((manual_merge_required)); then
   echo "ERROR: installation incomplete: the reviewed AGENTS.md block was not applied because conditional replacement is unavailable; merge it manually." >&2
-  exit 4
-fi
-
-if ((confirmation_required)); then
-  echo "ERROR: installation incomplete: AGENTS.md routing was not applied; rerun with a controlling terminal to review and confirm." >&2
   exit 4
 fi
 

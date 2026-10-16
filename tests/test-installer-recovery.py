@@ -256,10 +256,10 @@ def assert_install_complete(
     assert codex_path.is_file() and claude_path.is_file(), "both provider settings files must exist"
     if user_settings_path is not None and metadata is not None:
         assert_user_metadata_unchanged(user_settings_path, metadata)
-    codex = json.loads(codex_path.read_text(encoding="utf-8"))
+    codex = json.loads(read_noatime(codex_path).decode("utf-8"))
     codex_handlers = [handler for session in codex["hooks"]["SessionStart"] for handler in session.get("hooks", [])]
     assert [handler.get("command") for handler in codex_handlers].count(CODEX_COMMAND) == 1, "Codex hook missing or duplicated"
-    claude = json.loads(claude_path.read_text(encoding="utf-8"))
+    claude = json.loads(read_noatime(claude_path).decode("utf-8"))
     claude_handlers = [handler for session in claude["hooks"]["SessionStart"] for handler in session.get("hooks", [])]
     assert [handler.get("command") for handler in claude_handlers].count(CLAUDE_COMMAND) == 1, "Claude hook missing or duplicated"
     user_provider = "claude" if provider == "codex" else "codex"

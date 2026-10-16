@@ -177,13 +177,14 @@ fi
 preflight_hook_config() {
   local provider="$1"
   local settings_path="$2"
-  python3 - "$provider" "$settings_path" <<'PY'
+  python3 - "$provider" "$settings_path" "$TARGET_DIR" "$TRANSACTION_HELPER" <<'PY'
 import json
 import os
 import stat
+import subprocess
 import sys
 
-provider, filename = sys.argv[1:]
+provider, filename, target_dir, helper = sys.argv[1:]
 try:
     if os.path.lexists(filename):
         info = os.lstat(filename)
@@ -192,7 +193,22 @@ try:
         if not stat.S_ISREG(info.st_mode):
             raise OSError("settings path is not a regular file")
         if info.st_nlink > 1:
-            raise OSError("hard-linked settings files are not accepted")
+            if info.st_nlink != 2:
+                raise OSError("settings file has extra hard links")
+            validation = subprocess.run(
+                [sys.executable, helper, "validate-hook-staging", target_dir, provider],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                env=os.environ.copy(),
+                pass_fds=(int(os.environ["SELF_EVOLUTION_FLYWHEEL_LOCK_FD"]),),
+            )
+            if validation.returncode != 0:
+                detail = validation.stdout.strip()
+                raise OSError(
+                    "multiply-linked settings lack one verified provider staging candidate"
+                    + (f": {detail}" if detail else "")
+                )
         for name in os.listxattr(filename, follow_symlinks=False):
             os.getxattr(filename, name, follow_symlinks=False)
         with open(filename, encoding="utf-8") as handle:
@@ -655,6 +671,25 @@ if ((confirmation_required)); then
   exit 4
 fi
 
+release_target_lock() {
+  local lock_fd="${SELF_EVOLUTION_FLYWHEEL_LOCK_FD:-}"
+  [[ -z "$lock_fd" ]] && return 0
+  case "$lock_fd" in
+    *[!0-9]*)
+      echo "ERROR: installer lock descriptor is invalid; refusing to launch bootstrap CLI." >&2
+      return 1
+      ;;
+  esac
+  ((lock_fd > 2)) || {
+    echo "ERROR: installer lock descriptor cannot be safely closed; refusing to launch bootstrap CLI." >&2
+    return 1
+  }
+  # The descriptor is supplied by our launcher and validated as digits above;
+  # numeric eval keeps this close operation compatible with macOS Bash 3.2.
+  eval "exec ${lock_fd}>&-"
+  unset SELF_EVOLUTION_FLYWHEEL_LOCK_FD
+}
+
 if [[ -n "$BOOTSTRAP_AGENT" ]]; then
   [[ "$prompt_ready" == 1 ]] || {
     echo "ERROR: an existing prompts/bootstrap-project.md differs from the template; preserved it and will not launch it automatically." >&2
@@ -665,6 +700,7 @@ if [[ -n "$BOOTSTRAP_AGENT" ]]; then
       command -v codex >/dev/null 2>&1 || { echo "ERROR: codex CLI not found in PATH." >&2; exit 127; }
       echo "Starting Codex with prompts/bootstrap-project.md (workspace-write sandbox)."
       cd "$TARGET_DIR"
+      release_target_lock || exit 3
       exec codex exec --sandbox workspace-write - < prompts/bootstrap-project.md
       ;;
     claude)
@@ -672,6 +708,7 @@ if [[ -n "$BOOTSTRAP_AGENT" ]]; then
       echo "Starting Claude Code with prompts/bootstrap-project.md."
       prompt="$(cat "$TARGET_DIR/prompts/bootstrap-project.md")"
       cd "$TARGET_DIR"
+      release_target_lock || exit 3
       exec claude "$prompt"
       ;;
   esac

@@ -248,7 +248,7 @@ def inspect_existing(parent_fd, name, allow_hardlinks=False):
         return None
     try:
         data = read_open_file(fd)
-        return {"data": data}
+        return {"data": data, "nlink": os.fstat(fd).st_nlink}
     finally:
         os.close(fd)
 
@@ -479,7 +479,7 @@ def expected_new_hook_payload(provider):
     return (json.dumps(config, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
 
 
-def recover_provider_staging(root, provider):
+def recover_provider_staging(root, provider, report=True):
     if provider not in HOOK_SETTINGS:
         raise InstallError(f"unknown provider: {provider}")
     descriptor = os.environ.get(LOCK_FD_ENV)
@@ -495,14 +495,14 @@ def recover_provider_staging(root, provider):
         try:
             parent_fd, name = open_parent(root_fd, relative, False, state, "")
         except FileNotFoundError:
-            return
+            return False
         if not verify_parent(root, root_fd, relative, parent_fd):
             raise InstallError(f"target directory moved or changed during staging recovery: {relative}")
 
         prefix = f".{name}.flywheel-"
         matching = [entry for entry in os.listdir(parent_fd) if entry.startswith(prefix)]
         if not matching:
-            return
+            return False
         pattern = re.compile(rf"\.{re.escape(name)}\.flywheel-[0-9]+-[0-9a-f]{{12}}\Z")
         unknown = [entry for entry in matching if pattern.fullmatch(entry) is None]
         if unknown:
@@ -561,8 +561,8 @@ def recover_provider_staging(root, provider):
                 f"possible provider staging entry {alias} does not match the installer's expected {provider} settings; left untouched"
             )
 
-        # Recheck the exact name/inode/link-count immediately before touching
-        # only the hidden alias; the active settings path is never replaced.
+        # Recheck the candidate, but never unlink it: a pathname can be replaced
+        # after any lstat/identity check, and unlink would then delete user data.
         current_active = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
         current_alias = os.stat(alias, dir_fd=parent_fd, follow_symlinks=False)
         if (
@@ -579,12 +579,13 @@ def recover_provider_staging(root, provider):
         ):
             raise InstallError(f"provider staging entry {alias} changed during validation; left untouched")
         if not verify_parent(root, root_fd, relative, parent_fd):
-            raise InstallError(f"target directory moved before staging cleanup for {relative}; left untouched")
-        os.unlink(alias, dir_fd=parent_fd)
-        final_active = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
-        if (final_active.st_dev, final_active.st_ino) != (active_info.st_dev, active_info.st_ino) or final_active.st_nlink != 1:
-            raise InstallError(f"active settings changed while removing staging entry {alias}; inspect manually")
-        print(f"RECOVERED installer staging link {alias} for {relative}")
+            raise InstallError(f"target directory moved during staging inspection for {relative}; left untouched")
+        if report:
+            print(
+                f"PRESERVED possible installer staging link {alias} for {relative}; "
+                "its origin cannot be proven from its name or metadata, so it was not removed"
+            )
+        return True
     finally:
         if parent_fd is not None:
             os.close(parent_fd)
@@ -601,7 +602,7 @@ def op_merge_hook(root, provider, relative, state_path):
         parent_fd, name = open_parent(root_fd, relative, True, state, state_path)
         if not verify_parent(root, root_fd, relative, parent_fd):
             raise InstallError(f"target directory moved or changed after it was opened; refusing settings write: {relative}")
-        original = inspect_existing(parent_fd, name)
+        original = inspect_existing(parent_fd, name, allow_hardlinks=True)
         config = {}
         if original is not None:
             try:
@@ -616,6 +617,12 @@ def op_merge_hook(root, provider, relative, state_path):
                 continue
             for handler in existing.get("hooks", []):
                 if isinstance(handler, dict) and handler.get("command") == command:
+                    if original is not None and original["nlink"] > 1:
+                        if original["nlink"] != 2 or not recover_provider_staging(root, provider, report=False):
+                            raise InstallError(
+                                f"cannot safely accept multiply-linked {relative}; "
+                                "no unique verified provider staging candidate was found"
+                            )
                     print("HOOK PRESENT")
                     return
         if original is not None:
@@ -782,6 +789,9 @@ def main(argv):
             verify_target_lock(argv[1], argv[2])
         elif command == "recover-hook-staging" and len(argv) == 3:
             recover_provider_staging(argv[1], argv[2])
+        elif command == "validate-hook-staging" and len(argv) == 3:
+            if not recover_provider_staging(argv[1], argv[2], report=False):
+                raise InstallError(f"no verified provider staging candidate exists for {HOOK_SETTINGS.get(argv[2], argv[2])}")
         elif command == "init" and len(argv) == 3:
             root_fd = open_root(argv[1])
             os.close(root_fd)

@@ -40,7 +40,7 @@
 - Run time / time zone: `UNKNOWN`
 - Concurrent/overlapping runs, failure retries, timeout/interruption, and partial-write recovery strategy: `UNKNOWN` (verify against the project's actual scheduler and storage mechanisms)
 - Review record archive location: `docs/reviews/YYYY-MM-DD.md` (template convention; maintainers may adjust this for the project)
-- SHA reviewed through in the most recent completed review: `UNKNOWN` (also update the top marker in `LESSONS.md`)
+- Canonical reviewed-through SHA: the single marker at the top of [`LESSONS.md`](../LESSONS.md); do not maintain a duplicate watermark here.
 - Last review date: `UNKNOWN`
 - Lesson promotion threshold: 3 different review dates by default; see [`LESSONS.md`](../LESSONS.md). Only maintainers may explicitly adjust it.
 

@@ -3,6 +3,7 @@
 
 import base64
 import ctypes
+import errno
 import fcntl
 import hashlib
 import json
@@ -218,7 +219,7 @@ def read_open_file(fd, preserve_times=True):
             break
         chunks.append(chunk)
     data = b"".join(chunks)
-    if preserve_times:
+    if preserve_times and os.fstat(fd).st_atime_ns != info.st_atime_ns:
         os.utime(fd, ns=(info.st_atime_ns, info.st_mtime_ns))
     return data
 
@@ -232,7 +233,14 @@ def open_existing(parent_fd, name, reject_hardlinks=True):
         raise InstallError("destination is a symbolic link")
     if not stat.S_ISREG(info.st_mode):
         raise InstallError("destination is not a regular file")
-    fd = os.open(name, os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | NOFOLLOW | getattr(os, "O_NONBLOCK", 0), dir_fd=parent_fd)
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | NOFOLLOW | getattr(os, "O_NONBLOCK", 0)
+    noatime = getattr(os, "O_NOATIME", 0)
+    try:
+        fd = os.open(name, flags | noatime, dir_fd=parent_fd)
+    except OSError as exc:
+        if not noatime or exc.errno not in {errno.EPERM, errno.EINVAL, errno.EOPNOTSUPP, errno.ENOTSUP}:
+            raise
+        fd = os.open(name, flags, dir_fd=parent_fd)
     if reject_hardlinks and os.fstat(fd).st_nlink > 1:
         os.close(fd)
         raise InstallError("destination has multiple hard links; refusing to modify it")
@@ -392,8 +400,18 @@ def validate_config(config, filename):
     if not isinstance(sessions, list):
         raise InstallError(f"{filename}: 'hooks.SessionStart' must be a JSON array")
     for session in sessions:
-        if isinstance(session, dict) and not isinstance(session.get("hooks", []), list):
+        if not isinstance(session, dict):
+            raise InstallError(f"{filename}: each SessionStart entry must be a JSON object")
+        if "matcher" in session and not isinstance(session["matcher"], str):
+            raise InstallError(f"{filename}: each SessionStart matcher must be a string")
+        handlers = session.get("hooks")
+        if not isinstance(handlers, list):
             raise InstallError(f"{filename}: each SessionStart 'hooks' value must be a JSON array")
+        for handler in handlers:
+            if not isinstance(handler, dict) or not isinstance(handler.get("type"), str):
+                raise InstallError(f"{filename}: each SessionStart hook must be an object with a string 'type'")
+            if handler["type"] == "command" and not isinstance(handler.get("command"), str):
+                raise InstallError(f"{filename}: each command SessionStart hook must have a string 'command'")
     return sessions
 
 
@@ -415,6 +433,31 @@ def hook_entry(provider):
             "command": 'bash "${CLAUDE_PROJECT_DIR}/.agent-maintenance/session-start.sh" claude',
         }],
     }
+
+
+def hook_matches_all_session_sources(session):
+    matcher = session.get("matcher")
+    return "matcher" not in session or matcher in (
+        "",
+        "*",
+        ".*",
+        "startup|resume|clear|compact|fork",
+    )
+
+
+def hook_is_registered(provider, sessions):
+    command = hook_entry(provider)["hooks"][0]["command"]
+    return any(
+        isinstance(session, dict)
+        and hook_matches_all_session_sources(session)
+        and any(
+            isinstance(handler, dict)
+            and handler.get("type") == "command"
+            and handler.get("command") == command
+            for handler in session.get("hooks", [])
+        )
+        for session in sessions
+    )
 
 
 LOCK_FD_ENV = "SELF_EVOLUTION_FLYWHEEL_LOCK_FD"
@@ -608,20 +651,15 @@ def op_merge_hook(root, provider, relative, state_path):
                 raise InstallError(f"cannot safely parse {relative}: {exc}; no settings were changed") from exc
         sessions = validate_config(config, relative)
         entry = hook_entry(provider)
-        command = entry["hooks"][0]["command"]
-        for existing in sessions:
-            if not isinstance(existing, dict):
-                continue
-            for handler in existing.get("hooks", []):
-                if isinstance(handler, dict) and handler.get("command") == command:
-                    if original is not None and original["nlink"] > 1:
-                        if original["nlink"] != 2 or not recover_provider_staging(root, provider, report=False):
-                            raise InstallError(
-                                f"cannot safely accept multiply-linked {relative}; "
-                                "no unique verified provider staging candidate was found"
-                            )
-                    print("HOOK PRESENT")
-                    return
+        if hook_is_registered(provider, sessions):
+            if original is not None and original["nlink"] > 1:
+                if original["nlink"] != 2 or not recover_provider_staging(root, provider, report=False):
+                    raise InstallError(
+                        f"cannot safely accept multiply-linked {relative}; "
+                        "no unique verified provider staging candidate was found"
+                    )
+            print("HOOK PRESENT")
+            return
         if original is not None:
             fail(
                 f"cannot safely replace pre-existing {relative}: POSIX has no portable conditional replace for non-cooperative writers; file preserved, merge the hook manually",

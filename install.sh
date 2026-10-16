@@ -26,10 +26,12 @@ Usage: ./install.sh [--target DIR] [--no-hooks] [--bootstrap codex|claude]
 
 Install Self-Evolution Flywheel project guidance into an existing repository.
 Existing files are never overwritten. A different AGENTS.md is shown as a
-proposed diff but must be merged manually. Existing provider JSON is never
-rewritten: exact hooks are accepted, missing settings files are created, and
-adding a hook to a pre-existing JSON file requires a manual merge.
-Invalid settings are left untouched and cause an error.
+proposed diff and must be merged manually; the installer does not ask for
+confirmation when it cannot safely apply the change. Existing provider JSON is
+never rewritten: exact hooks are accepted, missing settings files are created,
+and if an existing settings file needs a hook added, only that provider's hook
+registration is skipped; the other provider is still validated independently.
+Other template files are still installed when both settings files are valid.
 
 Options:
   --target DIR              Destination project root (default: current directory)
@@ -180,6 +182,7 @@ preflight_hook_config() {
   local settings_path="$2"
   python3 - "$provider" "$settings_path" "$TARGET_DIR" "$TRANSACTION_HELPER" <<'PY'
 import json
+import errno
 import os
 import stat
 import subprocess
@@ -193,10 +196,14 @@ def open_checked_settings(path, expected):
         raise OSError("platform cannot safely open settings without following symbolic links")
 
     def opener(name, flags):
-        return os.open(
-            name,
-            flags | nofollow | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_CLOEXEC", 0),
-        )
+        safe_flags = flags | nofollow | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_CLOEXEC", 0)
+        noatime = getattr(os, "O_NOATIME", 0)
+        try:
+            return os.open(name, safe_flags | noatime)
+        except OSError as exc:
+            if not noatime or exc.errno not in {errno.EPERM, errno.EINVAL, errno.EOPNOTSUPP, errno.ENOTSUP}:
+                raise
+            return os.open(name, safe_flags)
 
     handle = open(path, encoding="utf-8", opener=opener)
     try:
@@ -245,10 +252,11 @@ try:
             try:
                 config = json.load(handle)
             finally:
-                os.utime(
-                    handle.fileno(),
-                    ns=(opened.st_atime_ns, opened.st_mtime_ns),
-                )
+                if os.fstat(handle.fileno()).st_atime_ns != opened.st_atime_ns:
+                    os.utime(
+                        handle.fileno(),
+                        ns=(opened.st_atime_ns, opened.st_mtime_ns),
+                    )
         finally:
             handle.close()
     else:
@@ -269,36 +277,89 @@ if not isinstance(sessions, list):
     print(f"ERROR: {filename}: 'hooks.SessionStart' must be a JSON array; no files were installed.", file=sys.stderr)
     sys.exit(3)
 for session in sessions:
-    if isinstance(session, dict) and not isinstance(session.get("hooks", []), list):
+    if not isinstance(session, dict):
+        print(f"ERROR: {filename}: each SessionStart entry must be a JSON object; no files were installed.", file=sys.stderr)
+        sys.exit(3)
+    if "matcher" in session and not isinstance(session["matcher"], str):
+        print(f"ERROR: {filename}: each SessionStart matcher must be a string; no files were installed.", file=sys.stderr)
+        sys.exit(3)
+    handlers = session.get("hooks")
+    if not isinstance(handlers, list):
         print(f"ERROR: {filename}: each SessionStart 'hooks' value must be a JSON array; no files were installed.", file=sys.stderr)
         sys.exit(3)
+    for handler in handlers:
+        if not isinstance(handler, dict) or not isinstance(handler.get("type"), str):
+            print(f"ERROR: {filename}: each SessionStart hook must be an object with a string 'type'; no files were installed.", file=sys.stderr)
+            sys.exit(3)
+        if handler["type"] == "command" and not isinstance(handler.get("command"), str):
+            print(f"ERROR: {filename}: each command SessionStart hook must have a string 'command'; no files were installed.", file=sys.stderr)
+            sys.exit(3)
 
 hook_commands = {
     "codex": 'bash "$(git rev-parse --show-toplevel)/.agent-maintenance/session-start.sh" codex',
     "claude": 'bash "${CLAUDE_PROJECT_DIR}/.agent-maintenance/session-start.sh" claude',
 }
+all_session_sources_matcher = "startup|resume|clear|compact|fork"
+
+def matcher_covers_all_sources(session):
+    if "matcher" not in session:
+        return True
+    return session["matcher"] in ("", "*", ".*", all_session_sources_matcher)
+
 registered = any(
     isinstance(session, dict)
+    and matcher_covers_all_sources(session)
     and any(
-        isinstance(handler, dict) and handler.get("command") == hook_commands[provider]
+        isinstance(handler, dict)
+        and handler.get("type") == "command"
+        and handler.get("command") == hook_commands[provider]
         for handler in session.get("hooks", [])
     )
     for session in sessions
 )
 if os.path.lexists(filename) and not registered:
     print(
-        f"ERROR: cannot safely merge into pre-existing {filename}: POSIX has no portable conditional replace for non-cooperative writers; file preserved. Add the hook manually or use --no-hooks; no files were installed.",
+        f"NOTICE: existing {filename} needs a manual hook merge; it was preserved and startup-hook registration is skipped. Template files will still be installed.",
         file=sys.stderr,
     )
-    sys.exit(3)
+    sys.exit(11)
 PY
 }
 
-# Validate both providers before installing any template files or changing either
-# provider's settings, so a later-provider parse/schema error cannot leave a partial install.
+# Validate both provider settings independently before installing any template
+# files. A valid conflict skips only that provider's hook registration.
+CODEX_HOOKS_ENABLED=0
+CLAUDE_HOOKS_ENABLED=0
+hook_config_conflicts=()
+codex_preflight_error=0
+claude_preflight_error=0
 if [[ "$INSTALL_HOOKS" == 1 ]]; then
-  preflight_hook_config codex "$TARGET_DIR/.codex/hooks.json"
-  preflight_hook_config claude "$TARGET_DIR/.claude/settings.json"
+  if preflight_hook_config codex "$TARGET_DIR/.codex/hooks.json"; then
+    CODEX_HOOKS_ENABLED=1
+  else
+    preflight_status=$?
+    if ((preflight_status == 11)); then
+      hook_config_conflicts+=(".codex/hooks.json")
+    else
+      codex_preflight_error=$preflight_status
+    fi
+  fi
+  if preflight_hook_config claude "$TARGET_DIR/.claude/settings.json"; then
+    CLAUDE_HOOKS_ENABLED=1
+  else
+    preflight_status=$?
+    if ((preflight_status == 11)); then
+      hook_config_conflicts+=(".claude/settings.json")
+    else
+      claude_preflight_error=$preflight_status
+    fi
+  fi
+  if ((codex_preflight_error)); then
+    exit "$codex_preflight_error"
+  fi
+  if ((claude_preflight_error)); then
+    exit "$claude_preflight_error"
+  fi
 fi
 
 # Never register hooks against a pre-existing project script with different
@@ -317,14 +378,15 @@ fi
 # Detect predictable destination permission failures before writing any template
 # files or provider settings. This checks only paths that would actually change.
 preflight_write_access() {
-  python3 - "$SOURCE_DIR" "$TARGET_DIR" "$INSTALL_HOOKS" "${files[@]}" <<'PY'
+  python3 - "$SOURCE_DIR" "$TARGET_DIR" "$CODEX_HOOKS_ENABLED" "$CLAUDE_HOOKS_ENABLED" "${files[@]}" <<'PY'
 import filecmp
 import json
+import errno
 import os
 import stat
 import sys
 
-source_dir, target_dir, hooks_enabled, *relative_files = sys.argv[1:]
+source_dir, target_dir, codex_hooks_enabled, claude_hooks_enabled, *relative_files = sys.argv[1:]
 needed_directories = set()
 
 def open_checked_settings(path, expected):
@@ -333,10 +395,14 @@ def open_checked_settings(path, expected):
         raise OSError("platform cannot safely open settings without following symbolic links")
 
     def opener(name, flags):
-        return os.open(
-            name,
-            flags | nofollow | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_CLOEXEC", 0),
-        )
+        safe_flags = flags | nofollow | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_CLOEXEC", 0)
+        noatime = getattr(os, "O_NOATIME", 0)
+        try:
+            return os.open(name, safe_flags | noatime)
+        except OSError as exc:
+            if not noatime or exc.errno not in {errno.EPERM, errno.EINVAL, errno.EOPNOTSUPP, errno.ENOTSUP}:
+                raise
+            return os.open(name, safe_flags)
 
     handle = open(path, encoding="utf-8", opener=opener)
     try:
@@ -373,12 +439,15 @@ for relative in relative_files:
         continue
     needed_directories.add(os.path.dirname(destination))
 
-if hooks_enabled == "1":
-    hook_commands = {
-        ".codex/hooks.json": 'bash "$(git rev-parse --show-toplevel)/.agent-maintenance/session-start.sh" codex',
-        ".claude/settings.json": 'bash "${CLAUDE_PROJECT_DIR}/.agent-maintenance/session-start.sh" claude',
+if codex_hooks_enabled == "1" or claude_hooks_enabled == "1":
+    hook_settings = {
+        ".codex/hooks.json": ("codex", codex_hooks_enabled, 'bash "$(git rev-parse --show-toplevel)/.agent-maintenance/session-start.sh" codex'),
+        ".claude/settings.json": ("claude", claude_hooks_enabled, 'bash "${CLAUDE_PROJECT_DIR}/.agent-maintenance/session-start.sh" claude'),
     }
-    for relative, command in hook_commands.items():
+    all_session_sources_matcher = "startup|resume|clear|compact|fork"
+    for relative, (provider, enabled, command) in hook_settings.items():
+        if enabled != "1":
+            continue
         filename = os.path.join(target_dir, relative)
         config = {}
         if os.path.lexists(filename):
@@ -393,10 +462,11 @@ if hooks_enabled == "1":
                     try:
                         config = json.load(handle)
                     finally:
-                        os.utime(
-                            handle.fileno(),
-                            ns=(opened.st_atime_ns, opened.st_mtime_ns),
-                        )
+                        if os.fstat(handle.fileno()).st_atime_ns != opened.st_atime_ns:
+                            os.utime(
+                                handle.fileno(),
+                                ns=(opened.st_atime_ns, opened.st_mtime_ns),
+                            )
                 finally:
                     handle.close()
             except Exception as exc:
@@ -408,8 +478,14 @@ if hooks_enabled == "1":
         sessions = config.get("hooks", {}).get("SessionStart", [])
         already_registered = any(
             isinstance(session, dict)
+            and (
+                "matcher" not in session
+                or session.get("matcher") in ("", "*", ".*", all_session_sources_matcher)
+            )
             and any(
-                isinstance(handler, dict) and handler.get("command") == command
+                isinstance(handler, dict)
+                and handler.get("type") == "command"
+                and handler.get("command") == command
                 for handler in session.get("hooks", [])
             )
             for session in sessions
@@ -531,7 +607,7 @@ PY
 prepare_managed_agents() {
   local destination_path="$1"
   local baseline="$work_dir/agents.original"
-  local stage_file action_file action prompt answer diff_status=0
+  local stage_file diff_status=0
 
   if ! command -v python3 >/dev/null 2>&1; then
     echo "PRESERVED existing file (Python 3 is required to safely manage AGENTS.md): AGENTS.md" >&2
@@ -542,12 +618,11 @@ prepare_managed_agents() {
     return 1
   fi
   stage_file="$(mktemp "$work_dir/agents-stage.XXXXXX")"
-  action_file="$work_dir/agents-action"
-  if ! python3 - "$baseline" "$managed_route_file" "$stage_file" "$action_file" <<'PY'
+  if ! python3 - "$baseline" "$managed_route_file" "$stage_file" <<'PY'
 import sys
 from pathlib import Path
 
-source, route_path, stage_path, action_path = map(Path, sys.argv[1:])
+source, route_path, stage_path = map(Path, sys.argv[1:])
 begin = "<!-- BEGIN SELF-EVOLUTION-FLYWHEEL MANAGED ROUTING -->"
 end = "<!-- END SELF-EVOLUTION-FLYWHEEL MANAGED ROUTING -->"
 
@@ -568,13 +643,11 @@ end_positions = [i for i, line in enumerate(markers) if line == end]
 
 if not begin_positions and not end_positions:
     updated = route + newline + text
-    action = "insert"
 elif len(begin_positions) == 1 and len(end_positions) == 1 and begin_positions[0] < end_positions[0]:
     first, last = begin_positions[0], end_positions[0]
     prefix = "".join(lines[:first])
     suffix = "".join(lines[last + 1 :])
     updated = prefix + route + suffix
-    action = "update"
 else:
     print("ERROR: AGENTS.md has missing, duplicated, or out-of-order managed routing markers; left unchanged.", file=sys.stderr)
     sys.exit(3)
@@ -582,7 +655,6 @@ else:
 try:
     with stage_path.open("w", encoding="utf-8", newline="") as handle:
         handle.write(updated)
-    action_path.write_text(action + "\n", encoding="utf-8")
 except OSError as exc:
     print(f"ERROR: cannot stage managed routing for AGENTS.md: {exc}; left unchanged.", file=sys.stderr)
     sys.exit(3)
@@ -592,7 +664,6 @@ PY
     return 1
   fi
 
-  action="$(cat "$action_file")"
   if cmp -s "$baseline" "$stage_file"; then
     rm -f "$stage_file"
     echo "UNCHANGED managed routing block in AGENTS.md"
@@ -607,50 +678,13 @@ PY
     return 1
   fi
 
-  if [[ "$action" == "insert" ]]; then
-    prompt="Insert the managed routing block at the beginning of AGENTS.md? [y/N] "
-  else
-    prompt="Update the existing managed routing block in AGENTS.md? [y/N] "
-  fi
-  if ! exec 3<>/dev/tty 2>/dev/null; then
-    echo "PRESERVED AGENTS.md: explicit confirmation requires a controlling terminal." >&2
-    rm -f "$stage_file"
-    return 2
-  fi
-  if [[ ! -t 1 ]]; then
-    display_managed_diff "$baseline" "$stage_file" >&3 || diff_status=$?
-    if ((diff_status > 1)); then
-      echo "PRESERVED existing file (could not display the proposed diff on the controlling terminal): AGENTS.md" >&2
-      rm -f "$stage_file"
-      exec 3>&-
-      return 1
-    fi
-  fi
-  printf '%s' "$prompt" >&3
-  IFS= read -r answer <&3 || answer=""
-  exec 3>&-
-  case "$answer" in
-    y|Y|yes|YES|Yes) ;;
-    *)
-      echo "PRESERVED AGENTS.md: managed routing change was not confirmed."
-      rm -f "$stage_file"
-      return 1
-      ;;
-  esac
-
-  if ! cmp -s "$baseline" "$destination_path"; then
-    echo "PRESERVED AGENTS.md: the file changed while awaiting confirmation; review and retry." >&2
-    rm -f "$stage_file"
-    return 1
-  fi
-  echo "PRESERVED AGENTS.md: safe automatic replacement is unavailable for non-cooperative writers; merge the reviewed block manually." >&2
+  echo "PRESERVED AGENTS.md: automatic replacement is unavailable; merge the reviewed block manually." >&2
   rm -f "$stage_file"
   return 3
 }
 
 prompt_ready=0
 conflicts=()
-confirmation_required=0
 manual_merge_required=0
 for relative_path in "${files[@]}"; do
   source_path="$SOURCE_DIR/$relative_path"
@@ -670,9 +704,7 @@ for relative_path in "${files[@]}"; do
         managed_status=$?
         echo "PRESERVED existing file (managed routing not applied): AGENTS.md"
         conflicts+=("$relative_path")
-        if ((managed_status == 2)); then
-          confirmation_required=1
-        elif ((managed_status == 3)); then
+        if ((managed_status == 3)); then
           manual_merge_required=1
         fi
       fi
@@ -712,13 +744,15 @@ merge_hook_config() {
   printf '%s %s\n' "$result" "$settings_path"
 }
 
-if [[ "$INSTALL_HOOKS" == 1 ]]; then
+if [[ "$CODEX_HOOKS_ENABLED" == 1 ]]; then
   merge_hook_config codex "$TARGET_DIR/.codex/hooks.json"
+fi
+if [[ "$CLAUDE_HOOKS_ENABLED" == 1 ]]; then
   merge_hook_config claude "$TARGET_DIR/.claude/settings.json"
 fi
 
 # All file and provider writes succeeded. Later notices, optional bootstrap launch,
-# or a confirmation-incomplete exit must not undo an otherwise completed install.
+# or a manual-merge exit must not undo an otherwise completed install.
 transaction_active=0
 
 if ((${#conflicts[@]})); then
@@ -727,23 +761,25 @@ echo "Some existing project files were preserved. Review/merge these if you want
   printf '  - %s\n' "${conflicts[@]}"
 fi
 
-if [[ "$INSTALL_HOOKS" == 1 ]]; then
+if ((CODEX_HOOKS_ENABLED || CLAUDE_HOOKS_ENABLED)); then
   cat <<'NOTICE'
 
-Startup hooks are registered in project-local settings. They only check for
-.agent-maintenance/bootstrap-complete and print a short instruction; they do not
-run shell commands from the project or fetch network content. Codex/Claude Code
-may require you to review/trust the project hook before it runs. See docs/installation.md.
+Startup hooks are registered where provider settings allowed safe registration.
+They only check for
+.agent-maintenance/bootstrap-complete and required project documents, then print
+a reminder; they do not run bootstrap, start a model, or fetch network content.
+Codex/Claude Code may require you to review/trust the project hook before it
+runs. See docs/installation.md.
 NOTICE
+fi
+
+if ((${#hook_config_conflicts[@]})); then
+  printf 'NOTICE: startup-hook registration was skipped for existing provider settings that need a manual merge: %s.\n' \
+    "${hook_config_conflicts[*]}"
 fi
 
 if ((manual_merge_required)); then
   echo "ERROR: installation incomplete: the reviewed AGENTS.md block was not applied because conditional replacement is unavailable; merge it manually." >&2
-  exit 4
-fi
-
-if ((confirmation_required)); then
-  echo "ERROR: installation incomplete: AGENTS.md routing was not applied; rerun with a controlling terminal to review and confirm." >&2
   exit 4
 fi
 

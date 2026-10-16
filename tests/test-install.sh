@@ -73,8 +73,6 @@ while time.monotonic() < drain_deadline:
     last_output = time.monotonic()
 
 Path(output_path).write_bytes(output)
-if not sent_answer:
-    raise SystemExit("installer did not display its confirmation prompt")
 raise SystemExit(os.waitstatus_to_exitcode(status))
 PY
 }
@@ -97,12 +95,38 @@ cmp -s "$TMP_DIR/original-session-start.sh" "$conflict_target/.agent-maintenance
 [[ ! -e "$conflict_target/.codex/hooks.json" ]] || fail "Codex hook settings were written despite the conflict"
 [[ ! -e "$conflict_target/.claude/settings.json" ]] || fail "Claude hook settings were written despite the conflict"
 
+# A valid pre-existing provider config that needs a hook merge is preserved;
+# only that provider is skipped while the other provider is still installed.
+existing_config_target="$TMP_DIR/existing-config-target"
+init_git_target "$existing_config_target"
+mkdir -p "$existing_config_target/.codex"
+printf '{"hooks":{}}\n' > "$existing_config_target/.codex/hooks.json"
+cp "$existing_config_target/.codex/hooks.json" "$TMP_DIR/existing-config-before.json"
+bash "$REPO_ROOT/install.sh" --target "$existing_config_target" > "$TMP_DIR/existing-config.log" 2>&1
+cmp -s "$TMP_DIR/existing-config-before.json" "$existing_config_target/.codex/hooks.json" \
+  || fail "manual-merge config conflict changed the existing settings"
+[[ -f "$existing_config_target/AGENTS.md" && -f "$existing_config_target/prompts/bootstrap-project.md" ]] \
+  || fail "a manual hook merge conflict blocked independent template files"
+[[ -f "$existing_config_target/.claude/settings.json" ]] \
+  || fail "Codex hook conflict incorrectly skipped Claude hook registration"
+python3 - "$existing_config_target/.claude/settings.json" <<'PY'
+import json
+import sys
+from pathlib import Path
+config = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+handlers = [handler for group in config["hooks"]["SessionStart"] for handler in group["hooks"]]
+assert any(handler.get("type") == "command" and handler.get("command") == 'bash "${CLAUDE_PROJECT_DIR}/.agent-maintenance/session-start.sh" claude' for handler in handlers)
+PY
+grep -Fq 'startup-hook registration is skipped' "$TMP_DIR/existing-config.log" \
+  || fail "manual hook merge conflict was not reported"
+
 # Invalid settings in the later provider are rejected before any template or
 # earlier-provider file is written.
 invalid_claude_target="$TMP_DIR/invalid-claude-target"
 init_git_target "$invalid_claude_target"
 mkdir -p "$invalid_claude_target/.codex" "$invalid_claude_target/.claude"
-printf '{"hooks":{}}\n' > "$invalid_claude_target/.codex/hooks.json"
+printf '%s\n' '{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"bash \"$(git rev-parse --show-toplevel)/.agent-maintenance/session-start.sh\" codex"}]}]}}' \
+  > "$invalid_claude_target/.codex/hooks.json"
 printf '{invalid json\n' > "$invalid_claude_target/.claude/settings.json"
 cp "$invalid_claude_target/.codex/hooks.json" "$TMP_DIR/codex-before-invalid-claude.json"
 cp "$invalid_claude_target/.claude/settings.json" "$TMP_DIR/claude-before-invalid.json"
@@ -479,8 +503,8 @@ cmp -s "$TMP_DIR/settings-link-outside-before.json" "$settings_link_outside" \
 grep -Fq 'settings file is a symbolic link' "$TMP_DIR/settings-link.log" \
   || fail "settings symlink rejection was not clear"
 
-# Existing hook JSON that would need modification is refused before project writes;
-# its content, ownership, mode, timestamps and xattrs must remain intact.
+# Existing hook JSON that would need modification is preserved without blocking
+# template files; its content, ownership, mode, timestamps and xattrs stay intact.
 hook_metadata_target="$TMP_DIR/hook-metadata-target"
 init_git_target "$hook_metadata_target"
 mkdir -p "$hook_metadata_target/.claude"
@@ -530,17 +554,27 @@ expected_path.write_text(json.dumps({
     "mode": stat.S_IMODE(info.st_mode),
     "atime_ns": info.st_atime_ns,
     "mtime_ns": info.st_mtime_ns,
+    "ctime_ns": info.st_ctime_ns,
     "attrs": {name: value.hex() for name, value in attrs.items()},
     "xattr_supported": xattr_supported,
 }), encoding="utf-8")
 PY
-if bash "$REPO_ROOT/install.sh" --target "$hook_metadata_target" > "$TMP_DIR/hook-metadata.log" 2>&1; then
-  fail "installer replaced pre-existing hook settings without conditional update support"
-fi
-[[ ! -e "$hook_metadata_target/AGENTS.md" ]] \
-  || fail "unsafe existing hook settings were detected after template writes"
-grep -Fq 'cannot safely merge into pre-existing' "$TMP_DIR/hook-metadata.log" \
-  || fail "unsafe existing settings refusal was not reported"
+bash "$REPO_ROOT/install.sh" --target "$hook_metadata_target" > "$TMP_DIR/hook-metadata.log" 2>&1 \
+  || fail "existing settings conflict prevented safe file-only installation"
+[[ -f "$hook_metadata_target/AGENTS.md" ]] \
+  || fail "existing settings conflict blocked independent template files"
+[[ -f "$hook_metadata_target/.codex/hooks.json" ]] \
+  || fail "Claude settings conflict incorrectly skipped Codex hook registration"
+python3 - "$hook_metadata_target/.codex/hooks.json" <<'PY'
+import json
+import sys
+from pathlib import Path
+config = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+handlers = [handler for group in config["hooks"]["SessionStart"] for handler in group["hooks"]]
+assert any(handler.get("type") == "command" and handler.get("command") == 'bash "$(git rev-parse --show-toplevel)/.agent-maintenance/session-start.sh" codex' for handler in handlers)
+PY
+grep -Fq 'startup-hook registration is skipped' "$TMP_DIR/hook-metadata.log" \
+  || fail "existing settings conflict did not explain the skipped hook registration"
 python3 - "$hook_metadata_target/.claude/settings.json" "$TMP_DIR/hook-metadata-expected.json" "$TMP_DIR/hook-settings-original.json" <<'PY'
 import json
 import os
@@ -561,29 +595,52 @@ assert (info.st_uid, info.st_gid) == (expected["uid"], expected["gid"]), "hook s
 assert stat.S_IMODE(info.st_mode) == expected["mode"], "hook settings permissions changed"
 assert info.st_atime_ns == expected["atime_ns"], "hook settings atime changed"
 assert info.st_mtime_ns == expected["mtime_ns"], "hook settings mtime changed"
+assert info.st_ctime_ns == expected["ctime_ns"], "hook settings ctime changed"
 actual = {name: os.getxattr(filename, name).hex() for name in os.listxattr(filename)}
 assert actual == expected["attrs"], "hook settings extended attributes or ACL changed"
 PY
 
-# The session-start hook emits only the fixed bootstrap context, stays quiet after
-# a non-empty completion marker, and honors CLAUDE_PROJECT_DIR for Claude Code.
+# The session-start hook only reminds, validates the completion marker and core
+# documents, and honors CLAUDE_PROJECT_DIR for Claude Code.
 session_target="$TMP_DIR/session-start-target"
 session_claude_target="$TMP_DIR/session-start-claude-target"
 init_git_target "$session_target"
 init_git_target "$session_claude_target"
 mkdir -p "$session_target/prompts" "$session_target/.agent-maintenance" "$session_claude_target/.agent-maintenance"
 cp "$REPO_ROOT/prompts/bootstrap-project.md" "$session_target/prompts/bootstrap-project.md"
-if ! (cd "$session_target" && bash "$REPO_ROOT/.agent-maintenance/session-start.sh") > "$TMP_DIR/session-unmarked.log" 2>&1; then
+for root in "$session_target" "$session_claude_target"; do
+  mkdir -p "$root/docs/subsystems"
+  for relative in AGENTS.md LESSONS.md docs/project-profile.md docs/code-standards.md docs/contributors.md docs/subsystems/README.md; do
+    printf '# fixture\n' > "$root/$relative"
+  done
+done
+if ! (cd "$session_target" && bash "$REPO_ROOT/.agent-maintenance/session-start.sh") > "$TMP_DIR/session-unmarked.log" 2> "$TMP_DIR/session-unmarked.stderr"; then
   fail "session-start failed for an unmarked project"
 fi
-grep -Fq 'setup is not marked complete' "$TMP_DIR/session-unmarked.log" \
-  || fail "session-start did not emit bootstrap context for an unmarked project"
+[[ ! -s "$TMP_DIR/session-unmarked.stderr" ]] || fail "normal bootstrap reminder was written to stderr"
+grep -Fq 'bootstrap reminder' "$TMP_DIR/session-unmarked.log" \
+  || fail "session-start did not emit a bootstrap reminder for an unmarked project"
+grep -Fq 'must not preempt or interrupt' "$TMP_DIR/session-unmarked.log" \
+  || fail "session-start reminder could preempt the user's task"
+grep -Fq './install.sh --bootstrap codex' "$TMP_DIR/session-unmarked.log" \
+  || fail "session-start did not point to explicit bootstrap"
 [[ ! -e "$session_target/.agent-maintenance/bootstrap-complete" ]] \
   || fail "session-start created a completion marker"
 printf 'complete\n' > "$session_target/.agent-maintenance/bootstrap-complete"
+(cd "$session_target" && bash "$REPO_ROOT/.agent-maintenance/session-start.sh") > "$TMP_DIR/session-legacy-marker.log" 2>&1
+grep -Fq 'completion marker is missing a valid Reviewed HEAD SHA' "$TMP_DIR/session-legacy-marker.log" \
+  || fail "a legacy marker without reviewed HEAD was treated as complete"
+printf 'Status: complete\nReviewed HEAD: 0123456789abcdef0123456789abcdef01234567\n' \
+  > "$session_target/.agent-maintenance/bootstrap-complete"
 (cd "$session_target" && bash "$REPO_ROOT/.agent-maintenance/session-start.sh") > "$TMP_DIR/session-marked.log" 2>&1
 [[ ! -s "$TMP_DIR/session-marked.log" ]] || fail "session-start was not quiet after bootstrap completion"
-printf 'complete\n' > "$session_claude_target/.agent-maintenance/bootstrap-complete"
+rm "$session_target/docs/code-standards.md"
+(cd "$session_target" && bash "$REPO_ROOT/.agent-maintenance/session-start.sh") > "$TMP_DIR/session-stale-marker.log" 2>&1
+grep -Fq 'completion marker is stale' "$TMP_DIR/session-stale-marker.log" \
+  || fail "a missing critical document did not invalidate the completion marker"
+printf '# fixture\n' > "$session_target/docs/code-standards.md"
+printf 'Status: complete\nReviewed HEAD: 0123456789abcdef0123456789abcdef01234567\n' \
+  > "$session_claude_target/.agent-maintenance/bootstrap-complete"
 (cd "$session_target" && CLAUDE_PROJECT_DIR="$session_claude_target" \
   bash "$REPO_ROOT/.agent-maintenance/session-start.sh" claude) > "$TMP_DIR/session-claude-root.log" 2>&1
 [[ ! -s "$TMP_DIR/session-claude-root.log" ]] || fail "Claude session-start ignored CLAUDE_PROJECT_DIR"
@@ -600,8 +657,8 @@ cmp -s "$TMP_DIR/original-session-start.sh" "$conflict_target/.agent-maintenance
 [[ ! -e "$conflict_target/.codex/hooks.json" ]] || fail "--no-hooks registered a Codex hook"
 [[ ! -e "$conflict_target/.claude/settings.json" ]] || fail "--no-hooks registered a Claude hook"
 
-# A differing AGENTS.md is never replaced silently. Even after confirmation,
-# the installer fails closed because portable conditional replacement is unavailable.
+# A differing AGENTS.md is never replaced silently. The installer displays a
+# proposed diff and requires a manual merge without asking for a fake confirmation.
 agents_target="$TMP_DIR/agents-target"
 mkdir -p "$agents_target"
 printf '# Maintainer-owned guidance\n\nKeep this text byte-for-byte.\n' > "$agents_target/AGENTS.md"
@@ -613,8 +670,11 @@ else
 fi
 grep -Fq -- '--- AGENTS.md (current)' "$TMP_DIR/agents-insert.log" \
   || fail "AGENTS.md proposed diff was not displayed"
-grep -Fq 'Insert the managed routing block at the beginning of AGENTS.md? [y/N]' "$TMP_DIR/agents-insert.log" \
-  || fail "AGENTS.md insertion did not request maintainer confirmation"
+if grep -Fq '[y/N]' "$TMP_DIR/agents-insert.log"; then
+  fail "AGENTS.md conflict asked for a confirmation the installer cannot honor"
+fi
+grep -Fq 'merge the reviewed block manually' "$TMP_DIR/agents-insert.log" \
+  || fail "AGENTS.md proposed diff did not explain the manual merge"
 cmp -s "$TMP_DIR/agents-before.md" "$agents_target/AGENTS.md" \
   || fail "confirmed AGENTS.md update changed the maintainer-owned file"
 [[ -f "$agents_target/prompts/bootstrap-project.md" ]] \
@@ -627,7 +687,7 @@ installed, original = map(Path, sys.argv[1:])
 assert installed.read_bytes() == original.read_bytes(), "AGENTS.md bytes changed"
 PY
 
-# A confirmed update of a pre-existing managed block must fail closed; its
+# An update of a pre-existing managed block must fail closed; its
 # owner, mode, and extended attributes (including ACLs) remain untouched.
 metadata_target="$TMP_DIR/agents-metadata-target"
 mkdir -p "$metadata_target"
@@ -708,7 +768,7 @@ if expected["acl_supported"]:
     assert os.getxattr(filename, "system.posix_acl_access") == bytes.fromhex(expected["acl_hex"]), "AGENTS.md ACL was lost or changed"
 PY
 
-# Atomic replacement cannot retain a file's hard-link relationship, so decline it.
+# Atomic replacement cannot retain a file's hard-link relationship, so preserve it.
 agents_hardlink_target="$TMP_DIR/agents-hardlink-target"
 mkdir -p "$agents_hardlink_target"
 printf '# Shared inode must remain intact\n' > "$agents_hardlink_target/AGENTS.md"
@@ -743,8 +803,14 @@ Path(sys.argv[1]).write_bytes(
     b"unsafe: \x1b[2J CSI \x1b]0;title-test\x07 C1: \xc2\x9b\n"
 )
 PY
-run_installer_in_pty "$REPO_ROOT/install.sh" "$agents_control_target" n "$TMP_DIR/agents-control.log" \
-  || fail "declining a control-character AGENTS.md update failed unexpectedly"
+if run_installer_in_pty "$REPO_ROOT/install.sh" "$agents_control_target" n "$TMP_DIR/agents-control.log"; then
+  fail "a differing AGENTS.md unexpectedly reported a complete routing install"
+else
+  [[ "$?" == 4 ]] || fail "AGENTS.md manual-merge status was not 4"
+fi
+if grep -Fq '[y/N]' "$TMP_DIR/agents-control.log"; then
+  fail "AGENTS.md control-sequence case asked for confirmation"
+fi
 python3 - "$TMP_DIR/agents-control.log" <<'PY'
 import sys
 from pathlib import Path
@@ -756,8 +822,8 @@ for visible in (b"\\x1b[2J", b"\\x1b]0;title-test", b"\\x07", b"\\x9b"):
     assert visible in output, f"escaped control was not visible in diff: {visible!r}"
 PY
 
-# Without a controlling terminal the managed change is not applied, and the
-# installer must return a detectable incomplete status without claiming success.
+# Without a controlling terminal the managed change is still shown as a manual
+# merge; terminal availability does not change the installer's behavior.
 agents_no_tty_target="$TMP_DIR/agents-no-tty-target"
 mkdir -p "$agents_no_tty_target"
 printf '# Keep without a TTY\n' > "$agents_no_tty_target/AGENTS.md"
@@ -781,24 +847,32 @@ if result.returncode != 4:
 PY
 cmp -s "$TMP_DIR/agents-no-tty-before.md" "$agents_no_tty_target/AGENTS.md" \
   || fail "no-TTY confirmation path changed AGENTS.md"
-grep -Fq 'explicit confirmation requires a controlling terminal' "$TMP_DIR/agents-no-tty.log" \
-  || fail "no-TTY confirmation requirement was not reported"
-grep -Fq 'installation incomplete:' "$TMP_DIR/agents-no-tty.log" \
-  || fail "no-TTY installation did not report its incomplete state"
+grep -Fq 'merge the reviewed block manually' "$TMP_DIR/agents-no-tty.log" \
+  || fail "no-TTY manual merge requirement was not reported"
+if grep -Fq '[y/N]' "$TMP_DIR/agents-no-tty.log"; then
+  fail "no-TTY AGENTS.md conflict asked for a confirmation"
+fi
 if grep -Fq 'Installation complete for:' "$TMP_DIR/agents-no-tty.log"; then
   fail "no-TTY installation falsely claimed completion"
 fi
 
-# Declining confirmation leaves AGENTS.md unchanged and reports the conflict.
+# Re-running with stdin closed also leaves AGENTS.md unchanged and reports the conflict.
 agents_decline_target="$TMP_DIR/agents-decline-target"
 mkdir -p "$agents_decline_target"
 printf '# Keep me\n' > "$agents_decline_target/AGENTS.md"
 cp "$agents_decline_target/AGENTS.md" "$TMP_DIR/agents-decline-before.md"
-run_installer_in_pty "$REPO_ROOT/install.sh" "$agents_decline_target" "" "$TMP_DIR/agents-decline.log"
+if run_installer_in_pty "$REPO_ROOT/install.sh" "$agents_decline_target" "" "$TMP_DIR/agents-decline.log"; then
+  fail "AGENTS.md conflict unexpectedly reported a complete routing install"
+else
+  [[ "$?" == 4 ]] || fail "AGENTS.md conflict returned an unexpected status"
+fi
 cmp -s "$TMP_DIR/agents-decline-before.md" "$agents_decline_target/AGENTS.md" \
   || fail "declining AGENTS.md insertion changed the file"
-grep -Fq 'managed routing change was not confirmed' "$TMP_DIR/agents-decline.log" \
-  || fail "declined AGENTS.md insertion was not reported"
+grep -Fq 'merge the reviewed block manually' "$TMP_DIR/agents-decline.log" \
+  || fail "AGENTS.md manual merge was not reported"
+if grep -Fq '[y/N]' "$TMP_DIR/agents-decline.log"; then
+  fail "AGENTS.md conflict still displayed a confirmation prompt"
+fi
 
 # A byte-identical AGENTS.md is left alone without a prompt; differing content
 # requires manual merge because a conditional atomic replacement is unavailable.
@@ -838,8 +912,11 @@ if run_installer_in_pty "$updated_source/install.sh" "$agents_target" y "$TMP_DI
 else
   [[ "$?" == 4 ]] || fail "unsafe managed-block update did not return incomplete status 4"
 fi
-grep -Fq 'Update the existing managed routing block in AGENTS.md? [y/N]' "$TMP_DIR/agents-update.log" \
-  || fail "changed managed block did not request confirmation"
+if grep -Fq '[y/N]' "$TMP_DIR/agents-update.log"; then
+  fail "changed managed block requested a confirmation the installer cannot honor"
+fi
+grep -Fq 'merge the reviewed block manually' "$TMP_DIR/agents-update.log" \
+  || fail "changed managed block did not report the manual merge requirement"
 cmp -s "$TMP_DIR/agents-update-before.md" "$agents_target/AGENTS.md" \
   || fail "confirmed managed-block update changed AGENTS.md"
 
@@ -878,11 +955,11 @@ for relative_path, command in expected.items():
         for session in config["hooks"]["SessionStart"]
         for handler in session.get("hooks", [])
     ]
-    assert any(handler.get("command") == command for handler in handlers), relative_path
+    assert any(handler.get("type") == "command" and handler.get("command") == command for handler in handlers), relative_path
 PY
 
-# A missing bootstrap prompt is diagnosed in stdout for the SessionStart model
-# context, without emitting the normal bootstrap instructions or failing the hook.
+# A missing bootstrap prompt is diagnosed in stderr and reported as a hook error,
+# without emitting normal bootstrap context or starting bootstrap itself.
 missing_prompt_target="$TMP_DIR/missing-prompt-target"
 init_git_target "$missing_prompt_target"
 mkdir -p "$missing_prompt_target/.agent-maintenance"
@@ -898,16 +975,15 @@ missing_prompt_status=0
   bash .agent-maintenance/session-start.sh codex \
     > "$TMP_DIR/missing-prompt.stdout" 2> "$TMP_DIR/missing-prompt.stderr"
 ) || missing_prompt_status=$?
-[[ "$missing_prompt_status" -eq 0 ]] \
-  || fail "missing-prompt SessionStart hook exited with status $missing_prompt_status"
+[[ "$missing_prompt_status" -eq 1 ]] \
+  || fail "missing-prompt SessionStart hook did not report a nonzero status: $missing_prompt_status"
 python3 - "$TMP_DIR/missing-prompt.stdout" "$TMP_DIR/missing-prompt.stderr" <<'PY'
 import sys
 from pathlib import Path
-
 stdout, stderr = (Path(path).read_bytes() for path in sys.argv[1:])
-expected = b"Self-Evolution Flywheel: prompts/bootstrap-project.md is missing; cannot bootstrap.\n"
-assert stdout == expected, f"unexpected missing-prompt stdout: {stdout!r}"
-assert stderr == b"", f"missing-prompt diagnostic was written to stderr: {stderr!r}"
+expected = b"Self-Evolution Flywheel: prompts/bootstrap-project.md is missing; bootstrap cannot run. This hook did not perform bootstrap; restore the prompt before using ./install.sh --bootstrap codex|claude.\n"
+assert stderr == expected, f"unexpected missing-prompt stderr: {stderr!r}"
+assert stdout == b"", f"missing-prompt diagnostic was written to stdout: {stdout!r}"
 PY
 
 # A script streamed through stdin has no BASH_SOURCE path. Simulate git clone

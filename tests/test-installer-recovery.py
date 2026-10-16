@@ -86,10 +86,14 @@ def make_fixture(
         if exc.errno not in {1, 13, 22, 95, 45, 61}:
             raise
     original_mtime_ns = 1_700_000_000_123_456_789
+    original_bytes = read_noatime(user_path)
+    original_xattr_value = os.getxattr(user_path, xattr_name) if xattr_supported else None
+    # Establish the test baseline only after fixture reads (including xattr
+    # inspection), since some CI filesystems can update atime during reads.
     os.utime(user_path, ns=(original_mtime_ns, original_mtime_ns))
     info = os.stat(user_path)
     metadata = {
-        "bytes": read_noatime(user_path),
+        "bytes": original_bytes,
         "uid": info.st_uid,
         "gid": info.st_gid,
         "mode": stat.S_IMODE(info.st_mode),
@@ -99,7 +103,7 @@ def make_fixture(
         "xattr_name": xattr_name,
     }
     if xattr_supported:
-        metadata["xattr_value"] = os.getxattr(user_path, xattr_name)
+        metadata["xattr_value"] = original_xattr_value
     return target, user_path, metadata
 
 
@@ -228,7 +232,9 @@ def assert_user_metadata_unchanged(path: pathlib.Path, expected: dict) -> None:
     assert read_noatime(path) == expected["bytes"], "user-owned settings bytes were changed"
     assert (info.st_uid, info.st_gid) == (expected["uid"], expected["gid"]), "existing settings owner/group changed"
     assert stat.S_IMODE(info.st_mode) == expected["mode"], "existing settings mode changed"
-    assert info.st_atime_ns == expected["atime_ns"], "existing settings atime changed"
+    assert info.st_atime_ns == expected["atime_ns"], (
+        f"user-owned settings atime changed: expected {expected['atime_ns']}, got {info.st_atime_ns}"
+    )
     assert info.st_mtime_ns == expected["mtime_ns"], "existing settings mtime changed"
     if expected["xattr_supported"]:
         assert os.getxattr(path, expected["xattr_name"]) == expected["xattr_value"], "existing settings xattr changed"

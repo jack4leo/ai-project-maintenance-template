@@ -124,6 +124,16 @@ def path_snapshot(repo: Path) -> dict[str, tuple[int, int, int, int]]:
     return snapshot
 
 
+def git_object_snapshot(repo: Path) -> dict[Path, tuple[int, int, str]]:
+    snapshot: dict[Path, tuple[int, int, str]] = {}
+    for path in (repo / ".git" / "objects").rglob("*"):
+        if path.is_file():
+            info = path.stat()
+            digest = hashlib.sha256(path.read_bytes()).hexdigest()
+            snapshot[path] = (info.st_size, info.st_mtime_ns, digest)
+    return snapshot
+
+
 class FrozenRangeTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory(prefix="range-freezer-test-")
@@ -398,7 +408,7 @@ class FrozenRangeTests(unittest.TestCase):
         self.assertEqual(manifest["through"], head)
         self.assertEqual(manifest["commits"], [])
 
-    def test_runner_never_writes_lessons_or_docs_reviews_and_preserves_atime(self) -> None:
+    def test_runner_never_writes_lessons_reviews_or_git_objects(self) -> None:
         lessons = self.repo / "LESSONS.md"
         policy = self.repo / "docs" / "automation" / "range-exclusions.json"
         review_dir = self.repo / "docs" / "reviews"
@@ -407,6 +417,8 @@ class FrozenRangeTests(unittest.TestCase):
         policy_bytes = policy.read_bytes()
         keep_bytes = keep.read_bytes()
         before_review_dir = review_dir.stat()
+        self.assertIn(self.anchor.encode("ascii"), lessons_bytes)
+        self.assertNotIn(b"UNKNOWN", lessons_bytes)
 
         old_atime_ns = 1_000_000_000
         for path in (lessons, policy):
@@ -417,12 +429,12 @@ class FrozenRangeTests(unittest.TestCase):
             for path in (self.repo / ".git" / "objects").rglob("*")
             if path.is_file()
         ]
+        object_snapshot = git_object_snapshot(self.repo)
         for path in git_objects:
             info = path.stat()
             os.utime(path, ns=(old_atime_ns, info.st_mtime_ns))
         lessons_atime = lessons.stat().st_atime_ns
         policy_atime = policy.stat().st_atime_ns
-        object_atimes = {path: path.stat().st_atime_ns for path in git_objects}
         before_tree = path_snapshot(self.repo)
 
         completed = invoke(self.repo)
@@ -431,10 +443,9 @@ class FrozenRangeTests(unittest.TestCase):
         self.assertIn("range_key", output)
 
         self.assertEqual(path_snapshot(self.repo), before_tree)
+        self.assertEqual(git_object_snapshot(self.repo), object_snapshot)
         self.assertEqual(lessons.stat().st_atime_ns, lessons_atime)
         self.assertEqual(policy.stat().st_atime_ns, policy_atime)
-        for path, atime_ns in object_atimes.items():
-            self.assertEqual(path.stat().st_atime_ns, atime_ns, str(path))
         self.assertEqual(
             FREEZER.read_regular_file_noatime(lessons, "LESSONS.md")[0], lessons_bytes
         )
@@ -447,7 +458,7 @@ class FrozenRangeTests(unittest.TestCase):
         self.assertEqual(after_review_dir.st_mtime_ns, before_review_dir.st_mtime_ns)
         self.assertEqual(after_review_dir.st_ctime_ns, before_review_dir.st_ctime_ns)
 
-    def test_packed_git_object_atime_is_preserved(self) -> None:
+    def test_runner_does_not_write_packed_git_objects(self) -> None:
         git(self.repo, "gc", "--prune=now")
         packed_files = [
             path
@@ -455,16 +466,11 @@ class FrozenRangeTests(unittest.TestCase):
             if path.is_file()
         ]
         self.assertTrue(any(path.suffix == ".pack" for path in packed_files))
-        old_atime_ns = 1_000_000_000
-        for path in packed_files:
-            info = path.stat()
-            os.utime(path, ns=(old_atime_ns, info.st_mtime_ns))
-        before = {path: path.stat().st_atime_ns for path in packed_files}
+        before = git_object_snapshot(self.repo)
 
         completed = invoke(self.repo)
         self.assertEqual(completed.returncode, 0, completed.stderr.decode(errors="replace"))
-        for path, atime_ns in before.items():
-            self.assertEqual(path.stat().st_atime_ns, atime_ns, str(path))
+        self.assertEqual(git_object_snapshot(self.repo), before)
 
     def test_failure_does_not_emit_partial_manifest(self) -> None:
         lessons = self.repo / "LESSONS.md"

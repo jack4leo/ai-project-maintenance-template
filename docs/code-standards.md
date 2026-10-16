@@ -51,10 +51,28 @@ This document defines the minimum review standards applicable to all projects, a
 
 - Sensitive paths, credentials, personal information, and high-risk operations: `BOOTSTRAP REQUIRED`
 - Confirmed design/compatibility decisions and their sources: `BOOTSTRAP REQUIRED`
-- Project-specific rules promoted from Lessons: `BOOTSTRAP REQUIRED`
+- Stable rules promoted from Lessons are listed in the block below. Give each rule a unique `PS-0001` ID and cite one or more promoted `L-0001` lesson IDs. The cited lessons must collectively contain at least three distinct, structured review-evidence dates as defined in [`LESSONS.md`](../LESSONS.md).
+
+#### Stable promoted rules
+
+The following bounded block is the authoritative location for project-specific stable promoted rules. Do not count one-off temporary safeguards as stable promotions.
+
+<!-- PROMOTED_RULES:START -->
+<!-- PROMOTED_RULES:END -->
+
+No project-specific stable rule is currently promoted.
+
+Each rule in the block above uses this format:
+
+```markdown
+##### PS-0001 — <one executable rule>
+- **Scope:** <where the rule applies>
+- **Evidence lessons:** `L-0001`, `L-0002`
+```
 
 ## Maintaining this standard
 
-- The agent may update section B using evidence from `LESSONS.md` and the distinct-date promotion rule; each new convention must state its scope and include an evidence link.
+- The agent may update section B using evidence from `LESSONS.md` and the distinct-date promotion rule; each new convention must state its scope and include an evidence link. Stable promoted rules must use the IDs and cross-references above.
+- The read-only Lesson-promotion CI gate validates the persisted record structure and distinct-date threshold. It does not calculate review ranges, create archives, or read or update the `reviewed-through` watermark; humans remain responsible for assessing the cited evidence's authenticity and meaning.
 - Section A is the general baseline. If removal or relaxation is needed, first propose a maintainer decision with a risk explanation; do not quietly expand a one-off local exception into a default.
 - Whenever CI, test commands, the toolchain, architecture, or an approved policy changes, check whether this section and `docs/project-profile.md` remain accurate.

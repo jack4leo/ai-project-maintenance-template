@@ -98,13 +98,10 @@ def open_parent(root_fd, relative, create, state, state_path):
                 try:
                     save_state(state_path, state)
                 except Exception:
-                    try:
-                        os.rmdir(component, dir_fd=fd)
-                    except OSError as cleanup_error:
-                        print(
-                            f"PRESERVED directory created before transaction journal failure: {'/'.join(walked)} ({cleanup_error})",
-                            file=sys.stderr,
-                        )
+                    print(
+                        f"PRESERVED directory created before transaction journal failure; rollback was incomplete because it was not removed safely: {'/'.join(walked)}",
+                        file=sys.stderr,
+                    )
                     raise
                 next_fd = os.open(component, DIR_FLAGS | NOFOLLOW, dir_fd=fd)
             os.close(fd)
@@ -736,22 +733,14 @@ def rollback(root, state_path):
                 if parent_fd is not None:
                     os.close(parent_fd)
         for relative in reversed(state["created_directories"]):
-            parent_fd = None
-            try:
-                parent_fd, name = open_parent(root_fd, relative, False, state, state_path)
-                os.rmdir(name, dir_fd=parent_fd)
-            except FileNotFoundError:
-                pass
-            except OSError:
-                # Never remove a directory that has become non-empty or unsafe.
-                print(f"PRESERVED created directory with concurrent contents: {relative}", file=sys.stderr)
-                incomplete = True
-            except InstallError as exc:
-                print(f"PRESERVED created directory {relative}: {exc}", file=sys.stderr)
-                incomplete = True
-            finally:
-                if parent_fd is not None:
-                    os.close(parent_fd)
+            # A held parent dirfd pins an inode but cannot prove that the inode
+            # remains beneath root at the rmdir syscall boundary. Keep even an
+            # empty directory rather than risk deleting one moved outside root.
+            print(
+                f"PRESERVED created directory during rollback; it was not removed because a directory descriptor cannot prove it remains inside the target: {relative}",
+                file=sys.stderr,
+            )
+            incomplete = True
     finally:
         os.close(root_fd)
     return 1 if incomplete else 0

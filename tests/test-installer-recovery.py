@@ -301,12 +301,24 @@ def test_sigkill_retry_repairs_install(tmp_root: pathlib.Path, provider: str) ->
     target, user_settings_path, metadata, alias, _ = crash_after_provider_publish(
         tmp_root, tmp_root, f"sigkill-{provider}", provider
     )
+    if user_settings_path is not None and metadata is not None:
+        interrupted_atime = os.stat(user_settings_path).st_atime_ns
+        assert interrupted_atime == metadata["atime_ns"], (
+            f"{provider} interrupted publish changed user settings atime before recovery: "
+            f"expected {metadata['atime_ns']}, got {interrupted_atime}"
+        )
     for attempt in range(2):
         result = install(target, installer_env(tmp_root))
         assert result.returncode == 0, (
             f"rerunning after {provider} SIGKILL did not succeed on attempt {attempt + 1}; "
             f"exit={result.returncode}\n{result.stdout}"
         )
+        if user_settings_path is not None and metadata is not None:
+            retry_atime = os.stat(user_settings_path).st_atime_ns
+            assert retry_atime == metadata["atime_ns"], (
+                f"{provider} recovery attempt {attempt + 1} changed user settings atime: "
+                f"expected {metadata['atime_ns']}, got {retry_atime}"
+            )
         assert_install_complete(target, user_settings_path, metadata, alias, provider)
 
 

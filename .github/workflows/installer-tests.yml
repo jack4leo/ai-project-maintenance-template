@@ -1,0 +1,15 @@
+name: Installer regression tests
+
+on: [push, pull_request, workflow_dispatch]
+
+permissions:
+  contents: read
+
+jobs:
+  installer-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+      - name: Run installer regression tests
+        run: bash tests/test-install.sh

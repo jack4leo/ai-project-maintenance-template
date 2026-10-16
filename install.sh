@@ -1,19 +1,18 @@
 #!/usr/bin/env bash
 set -eo pipefail
 
-# A raw-GitHub pipe has no script directory, so fetch the full source tree before
+# A raw-GitHub pipe has no script directory, so clone the full source tree before
 # delegating to the regular installer. Local checkout/template installs stay offline.
 if [[ -z "${BASH_SOURCE[0]:-}" ]]; then
-  command -v curl >/dev/null 2>&1 || { echo "ERROR: curl is required for pipe installation." >&2; exit 127; }
-  command -v tar >/dev/null 2>&1 || { echo "ERROR: tar is required for pipe installation." >&2; exit 127; }
+  command -v git >/dev/null 2>&1 || { echo "ERROR: git is required for pipe installation." >&2; exit 127; }
 
   source_dir="$(mktemp -d)"
   trap 'rm -rf "$source_dir"' EXIT
-  echo "Downloading Self-Evolution Flywheel source archive..."
-  curl -fsSL "https://github.com/jack4leo/self-evolution-flywheel/archive/refs/heads/main.tar.gz" \
-    | tar -xz -C "$source_dir" --strip-components=1
+  echo "Cloning Self-Evolution Flywheel source..."
+  git clone --quiet --depth 1 --single-branch --branch main \
+    "https://github.com/jack4leo/self-evolution-flywheel.git" "$source_dir"
   [[ -f "$source_dir/install.sh" && -f "$source_dir/prompts/bootstrap-project.md" ]] || {
-    echo "ERROR: downloaded archive is missing installer files." >&2
+    echo "ERROR: cloned source is missing installer files." >&2
     exit 2
   }
 
@@ -115,6 +114,93 @@ while IFS= read -r -d '' source_path; do
   files+=("${source_path#"$SOURCE_DIR"/}")
 done < <(find "$SOURCE_DIR/docs" "$SOURCE_DIR/prompts" -type f \
   ! -path "$SOURCE_DIR/docs/source-and-extraction.md" -print0)
+
+validate_destination_parents() {
+  local relative_path="$1"
+  local parent_path="${relative_path%/*}"
+  [[ "$parent_path" == "$relative_path" ]] && return 0
+
+  local current="$TARGET_DIR"
+  local component
+  local -a components
+  IFS='/' read -r -a components <<< "$parent_path"
+  for component in "${components[@]}"; do
+    current="$current/$component"
+    if [[ -L "$current" ]]; then
+      echo "ERROR: target path traverses a symbolic-link directory: ${current#"$TARGET_DIR"/}" >&2
+      return 1
+    fi
+    if [[ -e "$current" && ! -d "$current" ]]; then
+      echo "ERROR: target path parent is not a directory: ${current#"$TARGET_DIR"/}" >&2
+      return 1
+    fi
+  done
+}
+
+for relative_path in "${files[@]}"; do
+  validate_destination_parents "$relative_path" || exit 3
+done
+if [[ "$INSTALL_HOOKS" == 1 ]]; then
+  validate_destination_parents ".codex/hooks.json" || exit 3
+  validate_destination_parents ".claude/settings.json" || exit 3
+fi
+
+preflight_hook_config() {
+  local provider="$1"
+  local settings_path="$2"
+  python3 - "$provider" "$settings_path" <<'PY'
+import json
+import os
+import stat
+import sys
+
+provider, filename = sys.argv[1:]
+try:
+    if os.path.lexists(filename):
+        info = os.lstat(filename)
+        if stat.S_ISLNK(info.st_mode):
+            raise OSError("settings file is a symbolic link")
+        if not stat.S_ISREG(info.st_mode):
+            raise OSError("settings path is not a regular file")
+        if info.st_nlink > 1:
+            raise OSError("atomic replacement would break hard links")
+        for name in os.listxattr(filename, follow_symlinks=False):
+            os.getxattr(filename, name, follow_symlinks=False)
+        with open(filename, encoding="utf-8") as handle:
+            try:
+                config = json.load(handle)
+            finally:
+                os.utime(handle.fileno(), ns=(info.st_atime_ns, info.st_mtime_ns))
+    else:
+        config = {}
+except Exception as exc:
+    print(f"ERROR: cannot safely prepare {filename}: {exc}; no files were installed.", file=sys.stderr)
+    sys.exit(3)
+
+if not isinstance(config, dict):
+    print(f"ERROR: {filename} must contain a JSON object; no files were installed.", file=sys.stderr)
+    sys.exit(3)
+hooks = config.get("hooks", {})
+if not isinstance(hooks, dict):
+    print(f"ERROR: {filename}: 'hooks' must be a JSON object; no files were installed.", file=sys.stderr)
+    sys.exit(3)
+sessions = hooks.get("SessionStart", [])
+if not isinstance(sessions, list):
+    print(f"ERROR: {filename}: 'hooks.SessionStart' must be a JSON array; no files were installed.", file=sys.stderr)
+    sys.exit(3)
+for session in sessions:
+    if isinstance(session, dict) and not isinstance(session.get("hooks", []), list):
+        print(f"ERROR: {filename}: each SessionStart 'hooks' value must be a JSON array; no files were installed.", file=sys.stderr)
+        sys.exit(3)
+PY
+}
+
+# Validate both providers before installing any template files or changing either
+# provider's settings, so a later-provider parse/schema error cannot leave a partial install.
+if [[ "$INSTALL_HOOKS" == 1 ]]; then
+  preflight_hook_config codex "$TARGET_DIR/.codex/hooks.json"
+  preflight_hook_config claude "$TARGET_DIR/.claude/settings.json"
+fi
 
 # Never register hooks against a pre-existing project script with different
 # contents. Do this before copying files or changing either provider's settings.
@@ -450,17 +536,31 @@ else:
         }],
     }
 
-if filename.exists():
+if os.path.lexists(filename):
     try:
+        original = os.lstat(filename)
+        if stat.S_ISLNK(original.st_mode):
+            raise OSError("settings file is a symbolic link")
+        if not stat.S_ISREG(original.st_mode):
+            raise OSError("settings path is not a regular file")
+        if original.st_nlink > 1:
+            raise OSError("atomic replacement would break hard links")
+        attributes = {
+            name: os.getxattr(filename, name, follow_symlinks=False)
+            for name in os.listxattr(filename, follow_symlinks=False)
+        }
         with filename.open(encoding="utf-8") as handle:
-            config = json.load(handle)
+            try:
+                config = json.load(handle)
+            finally:
+                os.utime(handle.fileno(), ns=(original.st_atime_ns, original.st_mtime_ns))
     except Exception as exc:
         print(f"ERROR: cannot safely parse {filename}: {exc}", file=sys.stderr)
         print("       No settings were changed; merge the hook manually.", file=sys.stderr)
         sys.exit(3)
-    old_mode = stat.S_IMODE(filename.stat().st_mode)
+    old_mode = stat.S_IMODE(original.st_mode)
 else:
-    config, old_mode = {}, 0o644
+    config, old_mode, original, attributes = {}, 0o644, None, {}
 
 if not isinstance(config, dict):
     print(f"ERROR: {filename} must contain a JSON object; left untouched.", file=sys.stderr)
@@ -478,7 +578,10 @@ command = entry["hooks"][0]["command"]
 for existing in sessions:
     if not isinstance(existing, dict):
         continue
-    for handler in existing.get("hooks", []):
+    existing_handlers = existing.get("hooks", [])
+    if not isinstance(existing_handlers, list):
+        continue
+    for handler in existing_handlers:
         if isinstance(handler, dict) and handler.get("command") == command:
             print(f"HOOK PRESENT {filename}")
             sys.exit(0)
@@ -490,7 +593,33 @@ try:
     with os.fdopen(fd, "w", encoding="utf-8") as handle:
         json.dump(config, handle, ensure_ascii=False, indent=2)
         handle.write("\n")
+    if original is not None:
+        os.chown(temp_name, original.st_uid, original.st_gid, follow_symlinks=False)
     os.chmod(temp_name, old_mode)
+    for name in os.listxattr(temp_name, follow_symlinks=False):
+        if name not in attributes:
+            os.removexattr(temp_name, name, follow_symlinks=False)
+    for name, value in attributes.items():
+        os.setxattr(temp_name, name, value, follow_symlinks=False)
+    if original is not None:
+        os.utime(
+            temp_name,
+            ns=(original.st_atime_ns, original.st_mtime_ns),
+            follow_symlinks=False,
+        )
+        result = os.stat(temp_name, follow_symlinks=False)
+        result_attributes = {
+            name: os.getxattr(temp_name, name, follow_symlinks=False)
+            for name in os.listxattr(temp_name, follow_symlinks=False)
+        }
+        if (
+            (result.st_uid, result.st_gid) != (original.st_uid, original.st_gid)
+            or stat.S_IMODE(result.st_mode) != stat.S_IMODE(original.st_mode)
+            or result.st_atime_ns != original.st_atime_ns
+            or result.st_mtime_ns != original.st_mtime_ns
+            or result_attributes != attributes
+        ):
+            raise OSError("staged settings metadata did not match the original")
     os.replace(temp_name, filename)
 except Exception:
     try:

@@ -18,7 +18,7 @@ If the target project does not contain a template copy and you do not want to cl
 curl -fsSL https://raw.githubusercontent.com/jack4leo/self-evolution-flywheel/main/install.sh | bash
 ```
 
-Pipeline mode first downloads a complete source archive of the `main` branch into a temporary directory and then invokes the same installer; template files are installed into the current directory, and Codex and Claude Code startup hooks are registered by default. Bash, Git, Python 3, curl, and tar are required. Use this command only after pipeline installation support has been merged into `main`. `curl | bash` executes a remote script immediately; inspect [install.sh](../install.sh) before first use. Codex/Claude Code may still require the user to trust the project settings. Pipeline mode always fetches the `main` archive; to pin a version, check out a reviewed commit SHA and run the local `./install.sh` from that checkout instead of pinning only the raw script URL.
+Pipeline mode shallow-clones `main` into a temporary directory; the piped script only performs the clone and delegates, so the installer and template files come from the same checkout instead of a separately downloaded source archive that could be out of sync. Git verifies object hashes, but not commit signatures. The template files are installed into the current directory, and Codex and Claude Code startup hooks are registered by default. Bash, Git, Python 3, and curl are required. Use this command only after pipeline-install support has been merged into `main`. `curl | bash` immediately executes a remote script; inspect [install.sh](../install.sh) before first use. Codex/Claude Code may still require the user to trust the project settings. Pipeline mode obtains the latest `main` commit available at clone time; to pin a version or verify a commit signature, check out and review the desired commit and run that checkout's local `./install.sh`, rather than pinning only the raw script URL.
 
 To start Codex Bootstrap immediately after installation (rather than only installing files and hooks), run:
 
@@ -56,7 +56,7 @@ Existing target files whose content differs are preserved by default and listed 
 
 The inserted block is delimited by `<!-- BEGIN SELF-EVOLUTION-FLYWHEEL MANAGED ROUTING -->` and `<!-- END SELF-EVOLUTION-FLYWHEEL MANAGED ROUTING -->`. On later runs, if the template routing has changed, the installer replaces only the content between the markers after displaying the diff again and obtaining confirmation; maintainer notes outside the block remain unchanged. During an update, the original file's owner, group, permissions, timestamps, and extended attributes (including readable/writable ACLs) are preserved; if these attributes cannot be retained safely, or if the file has hard links, the installer refuses to replace it. Terminal control characters in the diff are displayed using visible escape forms. A missing `AGENTS.md` is still copied as the complete template file; symlinks, non-regular files, or files with anomalous markers are not modified automatically.
 
-If `.agent-maintenance/session-start.sh` already exists and differs when hooks are enabled, the installer exits with an error before copying files or modifying settings and registers no startup hooks; resolve the file conflict and retry, or use `--no-hooks` to install other files only. Existing Codex/Claude JSON settings are preserved; the installer only appends one item to the `SessionStart` array. If the JSON is invalid or has a structural conflict, the script stops modifying that setting and reports an error rather than overwriting it with empty settings. Repeated runs recognize existing hooks and do not add duplicates.
+If `.agent-maintenance/session-start.sh` already exists and differs while hooks are enabled, the installer exits with an error before copying files or modifying settings and registers no startup hooks; resolve the conflict and retry, or use `--no-hooks` to install other files only. Before installation, it checks that target parent directories are not symlinks and preflights both Codex and Claude settings; if a settings file itself is a symlink, hard link, or non-regular file, or its JSON is invalid or structurally conflicting, installation fails before template files are copied. Existing Codex/Claude JSON settings are preserved, and the installer only appends one item to the `SessionStart` array. Atomic replacement preserves the settings file's owner, group, permissions, timestamps, and extended attributes (including readable/writable ACLs); if they cannot be preserved safely, the file is not replaced. Repeated runs recognize existing hooks and do not add duplicates.
 
 ## What the Startup Hooks Do
 
@@ -70,6 +70,10 @@ Treat hooks as part of the project code: inspect `.agent-maintenance/session-sta
 ## Completion Marker
 
 The bootstrap prompt requires the agent to write `.agent-maintenance/bootstrap-complete` only after completing the documentation review, verification, and report of remaining unknowns. In this repository, the marker means that the initialization process has run; it does not mean that all facts are known or that the maintainer has accepted pending decisions. If initialization is blocked or incomplete, the marker should remain absent so the hook continues prompting at later startups.
+
+## Installer Regression Tests
+
+The repository's `.github/workflows/installer-tests.yml` runs `bash tests/test-install.sh` on pushes, pull requests, and manual triggers. The test suite uses isolated temporary directories and does not modify real project files; run the same command locally.
 
 ## Official Behavior Documentation
 

@@ -148,8 +148,8 @@ cmp -s "$TMP_DIR/readonly-claude-before.json" "$readonly_claude_target/.claude/s
 grep -Fq 'no files were installed' "$TMP_DIR/readonly-claude.log" \
   || fail "read-only Claude preflight failure was not reported before installation"
 
-# Simulate a permission change after preflight but immediately before the Claude
-# atomic replacement. Earlier template and Codex writes must be rolled back.
+# Simulate a permission change after preflight but before Claude settings can be
+# staged. Earlier template and Codex writes must be rolled back.
 rollback_target="$TMP_DIR/rollback-target"
 init_git_target "$rollback_target"
 mkdir -p "$rollback_target/.codex" "$rollback_target/.claude"
@@ -163,11 +163,17 @@ real_python3="$(command -v python3)"
 cat > "$rollback_python_bin/python3" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
-script="$(cat)"
-if [[ "${2:-}" == "claude" && "$script" == *'provider, filename = sys.argv[1], Path(sys.argv[2])'* ]]; then
+if [[ "${1##*/}" == "installer-transaction.py" && "${2:-}" == "merge-hook" \
+    && "${4:-}" == "claude" && "$TEST_INJECT_MODE" == "rollback" ]]; then
   chmod 555 "$TEST_CLAUDE_DIR"
 fi
-printf '%s' "$script" | "$TEST_REAL_PYTHON3" "$@"
+if [[ "${1##*/}" == "installer-transaction.py" && "${2:-}" == "merge-hook" \
+    && "${4:-}" == "claude" && "$TEST_INJECT_MODE" == "concurrent" ]]; then
+  cat "$TEST_CODEX_EXPECTED" > "$TEST_CODEX"
+  cat "$TEST_AGENTS_EXPECTED" > "$TEST_AGENTS"
+  chmod 555 "$TEST_CLAUDE_DIR"
+fi
+exec "$TEST_REAL_PYTHON3" "$@"
 SH
 chmod +x "$rollback_python_bin/python3"
 python3 - "$REPO_ROOT/install.sh" "$rollback_target" "$TMP_DIR/rollback.log" "$TMP_DIR" "$rollback_python_bin" "$real_python3" <<'PY'
@@ -193,6 +199,7 @@ environment = os.environ.copy()
 environment["PATH"] = mock_bin + os.pathsep + environment["PATH"]
 environment["TEST_CLAUDE_DIR"] = str(Path(target) / ".claude")
 environment["TEST_REAL_PYTHON3"] = real_python
+environment["TEST_INJECT_MODE"] = "rollback"
 with Path(output_path).open("wb") as output:
     result = subprocess.run(
         ["bash", installer, "--target", target],
@@ -216,6 +223,106 @@ grep -Fq 'attempting to roll back this install' "$TMP_DIR/rollback.log" \
 if grep -Fq 'rollback was incomplete' "$TMP_DIR/rollback.log"; then
   fail "mid-install rollback reported incomplete restoration"
 fi
+
+# If another writer changes a file after this install wrote it, rollback must
+# preserve that writer's version, report incomplete recovery, and retain backups.
+concurrent_target="$TMP_DIR/concurrent-target"
+init_git_target "$concurrent_target"
+mkdir -p "$concurrent_target/.codex" "$concurrent_target/.claude"
+printf '{"hooks":{},"keep":"codex"}\n' > "$concurrent_target/.codex/hooks.json"
+printf '{"hooks":{},"keep":"claude"}\n' > "$concurrent_target/.claude/settings.json"
+concurrent_expected="$TMP_DIR/concurrent-codex-expected.json"
+printf '{"hooks":{},"external":"concurrent writer"}\n' > "$concurrent_expected"
+concurrent_agents_expected="$TMP_DIR/concurrent-agents-expected.md"
+printf '# External concurrent AGENTS update\n' > "$concurrent_agents_expected"
+cp "$concurrent_target/.claude/settings.json" "$TMP_DIR/concurrent-claude-before.json"
+python3 - "$REPO_ROOT/install.sh" "$concurrent_target" "$TMP_DIR/concurrent.log" "$TMP_DIR" "$rollback_python_bin" "$real_python3" "$concurrent_expected" "$concurrent_agents_expected" <<'PY'
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+installer, target, output_path, temp_root, mock_bin, real_python, expected, expected_agents = sys.argv[1:]
+if os.geteuid() == 0:
+    os.chmod(temp_root, 0o755)
+    for root in (Path(target), Path(mock_bin)):
+        for path in root.rglob("*"):
+            os.chown(path, 65534, 65534, follow_symlinks=False)
+        os.chown(root, 65534, 65534)
+
+def drop_privileges():
+    os.setgroups([])
+    os.setgid(65534)
+    os.setuid(65534)
+
+environment = os.environ.copy()
+environment["PATH"] = mock_bin + os.pathsep + environment["PATH"]
+environment["TEST_CLAUDE_DIR"] = str(Path(target) / ".claude")
+environment["TEST_CODEX"] = str(Path(target) / ".codex/hooks.json")
+environment["TEST_CODEX_EXPECTED"] = expected
+environment["TEST_AGENTS"] = str(Path(target) / "AGENTS.md")
+environment["TEST_AGENTS_EXPECTED"] = expected_agents
+environment["TEST_REAL_PYTHON3"] = real_python
+environment["TEST_INJECT_MODE"] = "concurrent"
+with Path(output_path).open("wb") as output:
+    result = subprocess.run(
+        ["bash", installer, "--target", target],
+        stdout=output,
+        stderr=subprocess.STDOUT,
+        env=environment,
+        preexec_fn=drop_privileges if os.geteuid() == 0 else None,
+    )
+if result.returncode == 0:
+    raise SystemExit("concurrent Claude write failure unexpectedly succeeded")
+PY
+chmod 755 "$concurrent_target/.claude"
+cmp -s "$concurrent_expected" "$concurrent_target/.codex/hooks.json" \
+  || fail "rollback overwrote a concurrent Codex settings update"
+cmp -s "$concurrent_agents_expected" "$concurrent_target/AGENTS.md" \
+  || fail "rollback deleted a newly installed file after a concurrent edit"
+cmp -s "$TMP_DIR/concurrent-claude-before.json" "$concurrent_target/.claude/settings.json" \
+  || fail "concurrent write failure changed Claude settings"
+grep -Fq 'PRESERVED concurrent change; rollback skipped: .codex/hooks.json' "$TMP_DIR/concurrent.log" \
+  || fail "rollback did not report preserving the concurrent Codex update"
+grep -Fq 'PRESERVED concurrent change; rollback skipped: AGENTS.md' "$TMP_DIR/concurrent.log" \
+  || fail "rollback did not report preserving the concurrently edited new file"
+grep -Fq 'rollback was incomplete' "$TMP_DIR/concurrent.log" \
+  || fail "concurrent update did not make incomplete rollback explicit"
+recovery_dir="$(sed -n 's/^ERROR: rollback snapshots retained for recovery at: //p' "$TMP_DIR/concurrent.log" | tail -n 1)"
+[[ -n "$recovery_dir" && -f "$recovery_dir/transaction.json" ]] \
+  || fail "incomplete rollback did not retain its recovery journal"
+compgen -G "$recovery_dir/rollback-*" >/dev/null \
+  || fail "incomplete rollback did not retain original file snapshots"
+
+# Replace a validated parent with a symlink exactly as the first nested write is
+# about to run. The descriptor-relative writer must refuse it and roll back.
+racy_symlink_target="$TMP_DIR/racy-symlink-target"
+racy_symlink_outside="$TMP_DIR/racy-symlink-outside"
+racy_python_bin="$TMP_DIR/racy-python-bin"
+mkdir -p "$racy_symlink_target/docs" "$racy_symlink_outside/automation" "$racy_python_bin"
+cat > "$racy_python_bin/python3" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ "${1##*/}" == "installer-transaction.py" && "${2:-}" == "copy" \
+    && "$4" == docs/* && ! -L "$TEST_TARGET/docs" ]]; then
+  mv "$TEST_TARGET/docs" "$TEST_TARGET/docs.before-race"
+  ln -s "$TEST_OUTSIDE" "$TEST_TARGET/docs"
+fi
+exec "$TEST_REAL_PYTHON3" "$@"
+SH
+chmod +x "$racy_python_bin/python3"
+if PATH="$racy_python_bin:$PATH" TEST_TARGET="$racy_symlink_target" \
+    TEST_OUTSIDE="$racy_symlink_outside" TEST_REAL_PYTHON3="$real_python3" \
+    bash "$REPO_ROOT/install.sh" --target "$racy_symlink_target" --no-hooks \
+    > "$TMP_DIR/racy-symlink.log" 2>&1; then
+  fail "installer accepted a parent replaced by a symlink after preflight"
+fi
+[[ ! -e "$racy_symlink_outside/automation/runner-contract.md" ]] \
+  || fail "post-preflight symlink replacement wrote outside the target"
+[[ ! -e "$racy_symlink_target/AGENTS.md" ]] \
+  || fail "post-preflight symlink refusal did not roll back earlier template writes"
+grep -Fq 'installation write failed; attempting to roll back' "$TMP_DIR/racy-symlink.log" \
+  || fail "post-preflight symlink refusal did not run transactional rollback"
 
 # Existing destination parents must be real directories, not symlinks outside the project.
 symlink_parent_target="$TMP_DIR/symlink-parent-target"

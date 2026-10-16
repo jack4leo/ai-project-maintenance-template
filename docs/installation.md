@@ -50,13 +50,15 @@ curl -fsSL https://raw.githubusercontent.com/jack4leo/self-evolution-flywheel/ma
 
 ## 安装内容与覆盖规则
 
-安装器复制根目录的 `AGENTS.md`、`CLAUDE.md`、`LESSONS.md`、安装器本身、`.agent-maintenance/session-start.sh`、`.github/PULL_REQUEST_TEMPLATE.md`，以及 `docs/`（不含仅描述模板来源的 `docs/source-and-extraction.md`）和 `prompts/` 下的文件。不会用模板版 `README.md` 替换目标项目自己的 README。
+安装器复制根目录的 `AGENTS.md`、`CLAUDE.md`、`LESSONS.md`、安装器本身、`.agent-maintenance/session-start.sh`、`.agent-maintenance/installer-transaction.py`、`.github/PULL_REQUEST_TEMPLATE.md`，以及 `docs/`（不含仅描述模板来源的 `docs/source-and-extraction.md`）和 `prompts/` 下的文件。不会用模板版 `README.md` 替换目标项目自己的 README。
 
 已存在且内容不同的目标文件默认保留，并在输出中列为冲突；脚本不会静默覆盖。`AGENTS.md` 是唯一例外：安装器会先显示把精简路由区插入后的 unified diff，再通过控制终端询问维护者。明确输入 `y` 才会应用；默认位置是文件首行，按 Enter 或输入其他内容都会保留原文件。没有可用控制终端时也会保留原文件，并以退出码 `4` 报告安装未完成，不会输出成功完成标记；其他无冲突文件可能已安装。
 
 插入区由 `<!-- BEGIN SELF-EVOLUTION-FLYWHEEL MANAGED ROUTING -->` 与 `<!-- END SELF-EVOLUTION-FLYWHEEL MANAGED ROUTING -->` 标记。后续运行若模板路由有更新，只会在再次显示差异并获得确认后替换标记之间的内容；区外的维护者说明保持不变。更新时会保留原文件的属主、属组、权限、时间戳和扩展属性（包括可读取/写入的 ACL）；若无法安全保留这些属性，或文件有硬链接，安装器会拒绝替换。差异中的终端控制字符会以可见转义形式显示。缺失的 `AGENTS.md` 仍会直接复制完整模板文件；符号链接、非普通文件或标记异常的文件不会被自动修改。
 
-若启用钩子时 `.agent-maintenance/session-start.sh` 已存在且内容不同，安装器会在复制或修改设置前报错退出，不注册任何启动钩子；解决文件冲突后可重试，或使用 `--no-hooks` 仅安装其他文件。安装前会检查所有目标父目录不是符号链接，并预检 Codex 与 Claude 两份设置；设置文件自身若是符号链接、硬链接、非普通文件，或 JSON 无效/结构冲突，安装会在复制模板文件前报错。Codex/Claude 的现有 JSON 设置会被保留，安装器仅向 `SessionStart` 数组追加一项。原子替换会保留设置文件的属主、属组、权限、时间戳和扩展属性（包括可读取/写入的 ACL）；无法安全保留时不会替换。重复运行会识别已有的钩子，不重复添加。
+若启用钩子时 `.agent-maintenance/session-start.sh` 已存在且内容不同，安装器会在复制或修改设置前报错退出，不注册任何启动钩子；解决文件冲突后可重试，或使用 `--no-hooks` 仅安装其他文件。预检会检查目标父目录、Codex/Claude 设置结构和可预见的写权限问题；设置文件自身若是符号链接、硬链接、非普通文件，或 JSON 无效/结构冲突，安装会在复制模板文件前报错。预检之后，每次实际写入仍会从目标根目录逐级打开真实目录并拒绝符号链接，不依赖一次性预检结果来授权后续路径写入。Codex/Claude 的现有 JSON 设置会被保留，安装器仅向 `SessionStart` 数组追加一项。原子替换会保留设置文件的属主、属组、权限、时间戳和扩展属性（包括可读取/写入的 ACL）；无法安全保留时不会替换。重复运行会识别已有的钩子，不重复添加。
+
+安装写入按事务日志记录。若模板复制或后续 provider 设置写入在运行中失败，安装器会按相反顺序尝试撤销本次已完成的写入，并恢复原设置；回滚只在目标仍是本次安装生成的版本时执行。若发现文件已被并发修改、替换或删除，安装器会保留该外部变更，不用旧快照覆盖，并报告回滚不完整；此时会保留事务日志和快照目录供恢复，路径会打印在错误输出中。预检可拦截静态错误，写时目录句柄检查可拦截预检后出现的 symlink 替换，事务回滚处理运行中的可恢复写入错误。多文件安装不是文件系统崩溃一致性事务：强制杀进程、断电或回滚路径本身也不可写时，仍可能需要按错误日志和保留的快照人工恢复；重跑安装前应先检查这些提示。
 
 ## 启动钩子会做什么
 
@@ -73,7 +75,7 @@ Bootstrap 提示词要求 agent 只在完成文档核查、验证并报告遗留
 
 ## 安装器回归测试
 
-仓库的 `.github/workflows/installer-tests.yml` 会在 push、pull request 和手动触发时运行 `bash tests/test-install.sh`。该套测试使用隔离临时目录，不修改真实项目文件；本地也可运行相同命令。
+仓库的 `.github/workflows/installer-tests.yml` 会在 push、pull request 和手动触发时运行 `bash tests/test-install.sh`。测试使用隔离临时目录，并覆盖预检拒绝、运行时故障回滚、并发改写既有/新建文件时保留并报告、预检后父目录变成 symlink 时拒绝越界写入，以及 hook 配置与文件元数据兼容；本地也可运行相同命令。
 
 ## 官方行为说明
 

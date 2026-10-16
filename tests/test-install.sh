@@ -515,6 +515,35 @@ for relative_path, command in expected.items():
     assert any(handler.get("command") == command for handler in handlers), relative_path
 PY
 
+# A missing bootstrap prompt is diagnosed in stdout for the SessionStart model
+# context, without emitting the normal bootstrap instructions or failing the hook.
+missing_prompt_target="$TMP_DIR/missing-prompt-target"
+init_git_target "$missing_prompt_target"
+mkdir -p "$missing_prompt_target/.agent-maintenance"
+cp "$REPO_ROOT/.agent-maintenance/session-start.sh" \
+  "$missing_prompt_target/.agent-maintenance/session-start.sh"
+[[ ! -e "$missing_prompt_target/.agent-maintenance/bootstrap-complete" ]] \
+  || fail "missing-prompt fixture unexpectedly has a completion marker"
+[[ ! -e "$missing_prompt_target/prompts/bootstrap-project.md" ]] \
+  || fail "missing-prompt fixture unexpectedly has the bootstrap prompt"
+missing_prompt_status=0
+(
+  cd "$missing_prompt_target"
+  bash .agent-maintenance/session-start.sh codex \
+    > "$TMP_DIR/missing-prompt.stdout" 2> "$TMP_DIR/missing-prompt.stderr"
+) || missing_prompt_status=$?
+[[ "$missing_prompt_status" -eq 0 ]] \
+  || fail "missing-prompt SessionStart hook exited with status $missing_prompt_status"
+python3 - "$TMP_DIR/missing-prompt.stdout" "$TMP_DIR/missing-prompt.stderr" <<'PY'
+import sys
+from pathlib import Path
+
+stdout, stderr = (Path(path).read_bytes() for path in sys.argv[1:])
+expected = b"Self-Evolution Flywheel: prompts/bootstrap-project.md is missing; cannot bootstrap.\n"
+assert stdout == expected, f"unexpected missing-prompt stdout: {stdout!r}"
+assert stderr == b"", f"missing-prompt diagnostic was written to stderr: {stderr!r}"
+PY
+
 # A script streamed through stdin has no BASH_SOURCE path. Simulate git clone
 # returning one complete checkout and verify the pipe shim delegates to its installer.
 mock_bin="$TMP_DIR/mock-bin"

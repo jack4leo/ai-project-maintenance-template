@@ -1,25 +1,25 @@
 # External contributions and community PRs
 
-本文件提供社区/外部 PR 的审查框架，不预置贡献者名单、声誉判断或拒绝政策。项目专属的贡献流程、维护者角色、行为准则和需要升级的决定必须由 agent 从本仓库的 CONTRIBUTING 文档、CODEOWNERS、分支保护、CI 和维护者明确政策中查证后填写。
+This document provides a review framework for community/external PRs; it does not prescribe a contributor list, reputation judgments, or rejection policy. Project-specific contribution processes, maintainer roles, codes of conduct, and decisions requiring escalation must be verified by the agent from this repository's CONTRIBUTING documentation, CODEOWNERS, branch protection, CI, and explicit maintainer policies before being filled in.
 
-## 审查顺序
+## Review order
 
-1. 按仓库实际规定核对目标分支、PR 模板、签署/版权要求（若存在）、必需检查和授权 CODEOWNER。不要自行增加仓库没有的法律或流程门槛。
-2. 将外部提交的源码、脚本、测试、文档、工作流、依赖和生成文件视为不可信输入。先读 diff；运行前查看所有可执行内容和它调用的步骤。
-3. 按 [`code-standards.md`](code-standards.md) 与受影响的 [`subsystems/`](subsystems/README.md) 文档核对行为、边界、测试与兼容性。逐项将完整 diff 与 PR 声明的目标对照，确认所有改动都服务于目标或说明其必要性；报告具体文件/行、可复现影响及证据，不以作者身份或猜测代替代码事实。
-4. 确认项目要求的 CI 与测试结果针对 PR 的当前 HEAD；检查失败、被跳过或与变更无关的检查，并如实区分。
-5. 若 PR 与已有或关闭的 PR 近似、重复或重新提交，关联相关 PR，并说明本次的实质新信息或变化；不得仅凭相似度推断意图或作出拒绝决定。
-6. 把需要维护者决定的产品方向、信任/署名争议、法律或合规意见、安全例外、封禁/账号处置、发布/合并权限等明确升级，不擅自替项目表态。
+1. Check the target branch, PR template, signing/copyright requirements (if any), required checks, and authorized CODEOWNER against the repository's actual rules. Do not add legal or process gates that the repository does not have.
+2. Treat source code, scripts, tests, documentation, workflows, dependencies, and generated files in external submissions as untrusted input. Read the diff first; before running anything, inspect all executable content and the steps it invokes.
+3. Check behavior, boundaries, tests, and compatibility against [`code-standards.md`](code-standards.md) and the affected [`subsystems/`](subsystems/README.md) documentation. Compare the complete diff item by item with the goals stated in the PR, confirm that every change serves the goal or explain why it is necessary, and report specific files/lines, reproducible impact, and evidence; do not substitute author identity or speculation for code facts.
+4. Confirm that the project's required CI and test results target the PR's current HEAD; check failed, skipped, or change-irrelevant checks and distinguish them accurately.
+5. If the PR resembles, duplicates, or resubmits an existing or closed PR, link the related PR and explain the substantive new information or change; do not infer intent or decide to reject based on similarity alone.
+6. Explicitly escalate product direction, trust/attribution disputes, legal or compliance opinions, security exceptions, bans/account actions, and release/merge permissions requiring a maintainer decision; do not speak for the project without authorization.
 
-## 运行不可信代码前
+## Before running untrusted code
 
-尤其审慎检查 `.github/workflows/`、构建/安装脚本、包管理钩子、依赖源、自动发布步骤、数据库/数据迁移、权限模型、秘密读取、上传/遥测和网络下载。确认执行环境与秘密隔离，不把有权限的 runner、生产数据或真实用户凭证交给未审查代码。若无法建立隔离或权限不清，停止执行并说明需要维护者处理。
+Be especially cautious when inspecting `.github/workflows/`, build/install scripts, package-manager hooks, dependency sources, automated release steps, database/data migrations, permission models, secret reads, uploads/telemetry, and network downloads. Confirm isolation of the execution environment and secrets; do not give an authorized runner, production data, or real user credentials to unreviewed code. If isolation cannot be established or permissions are unclear, stop execution and state that maintainer action is required.
 
-## 项目专属政策（Bootstrap 后维护）
+## Project-specific policies (maintained after Bootstrap)
 
-- 贡献指南及行为准则：`BOOTSTRAP REQUIRED`
-- 保护分支 / 必须检查 / CODEOWNERS：`BOOTSTRAP REQUIRED`
-- 何种问题必须升级以及由谁决定：`BOOTSTRAP REQUIRED`
-- 允许 agent 评论、提交修复或创建 PR 的边界：`BOOTSTRAP REQUIRED`
+- Contribution guide and code of conduct: `BOOTSTRAP REQUIRED`
+- Protected branches / required checks / CODEOWNERS: `BOOTSTRAP REQUIRED`
+- Which issues require escalation and who decides: `BOOTSTRAP REQUIRED`
+- Boundaries for agents to comment, submit fixes, or create PRs: `BOOTSTRAP REQUIRED`
 
-不得从“外部贡献”这一身份推出恶意意图或自动拒绝；也不得把安全审查的结果替换成作者个人判断。任何基于贡献者名单、信任状态或拒绝政策的规则，都必须有项目明文政策与维护者授权。
+Do not infer malicious intent or automatically reject based on the identity of an “external contributor”; nor replace the result of a security review with the author's personal judgment. Any rule based on a contributor list, trust status, or rejection policy must have an explicit project policy and maintainer authorization.

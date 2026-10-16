@@ -1,51 +1,51 @@
-# 项目档案（Bootstrap 后维护）
+# Project Profile (Maintained After Bootstrap)
 
-> 这是目标项目事实的索引，不是模板默认值。初始化 agent 必须从本仓库的源码、配置、CI、历史文档中查证填写。没有证据的字段保持 `UNKNOWN`；需要产品或权限决定的字段记录为待维护者确认。
+> This is an index of the target project's facts, not template defaults. The initializing agent must verify and fill it from this repository's source code, configuration, CI, and historical documentation. Keep fields without evidence as `UNKNOWN`; record fields requiring product or permission decisions as awaiting maintainer confirmation.
 
-## 身份与约定
+## Identity and Conventions
 
-- 项目名称 / 一句话用途：`UNKNOWN`
-- 默认分支：`UNKNOWN`
-- 文档语言：`UNKNOWN`（跟随项目维护者与仓库惯例）
-- 时区（复盘与排期）：`UNKNOWN`
-- 技术栈与受支持平台：`UNKNOWN`
-- 主要运行入口与部署形态：`UNKNOWN`
+- Project name / one-line purpose: `UNKNOWN`
+- Default branch: `UNKNOWN`
+- Documentation language: `UNKNOWN` (during bootstrap, verify the target repository's established language convention and confirm it with its maintainers)
+- Time zone (reviews and scheduling): `UNKNOWN`
+- Technology stack and supported platforms: `UNKNOWN`
+- Main runtime entry points and deployment form: `UNKNOWN`
 
-## 架构与验证
+## Architecture and Verification
 
-- 子系统索引：见 [`subsystems/README.md`](subsystems/README.md)
-- 格式化 / 静态检查命令：`UNKNOWN`
-- 快速定向测试：`UNKNOWN`
-- 全量测试：`UNKNOWN`
-- 构建 / 打包：`UNKNOWN`
-- CI 工作流与必需检查：`UNKNOWN`
-- 集成/真实环境验证：`UNKNOWN`（说明凭证、隔离和可运行的安全方式）
-- 已知不运行于 CI 的验证：`UNKNOWN`
-- 测试隔离策略（如临时 HOME/数据目录、凭证处理和临时资源清理）：`UNKNOWN`
-- 按平台/客户端划分的验证矩阵及未覆盖组合：`UNKNOWN`（只记录项目实际支持或受影响的维度）
-- 已知基线失败的调查 owner、记录渠道与处置约定：`UNKNOWN`
+- Subsystem index: see [`subsystems/README.md`](subsystems/README.md)
+- Formatting / static-check command: `UNKNOWN`
+- Fast targeted tests: `UNKNOWN`
+- Full test suite: `UNKNOWN`
+- Build / packaging: `UNKNOWN`
+- CI workflows and required checks: `UNKNOWN`
+- Integration/real-environment verification: `UNKNOWN` (describe credentials, isolation, and a runnable safe method)
+- Verification known not to run in CI: `UNKNOWN`
+- Test isolation strategy (such as temporary HOME/data directories, credential handling, and temporary-resource cleanup): `UNKNOWN`
+- Platform/client verification matrix and uncovered combinations: `UNKNOWN` (record only dimensions actually supported by or affected in the project)
+- Investigation owner, record channel, and handling convention for known baseline failures: `UNKNOWN`
 
-## 风险与权限边界
+## Risk and Permission Boundaries
 
-- 敏感路径、秘密和用户数据：`UNKNOWN`
-- 高风险文件/操作（如发布、迁移、权限、CI）：`UNKNOWN`
-- 明确的产品/兼容性决定及其来源：`UNKNOWN`
-- Agent 可执行的写入边界：`UNKNOWN`
-- 是否允许直接合并、发布、部署：`UNKNOWN`；未确认时不得假定已授权。
-- 外部贡献的拒收 / 升级维护者规则：见 [`contributors.md`](contributors.md)，按实际项目政策填写。
+- Sensitive paths, secrets, and user data: `UNKNOWN`
+- High-risk files/operations (such as release, migration, permissions, and CI): `UNKNOWN`
+- Explicit product/compatibility decisions and their sources: `UNKNOWN`
+- Agent write boundary: `UNKNOWN`
+- Whether direct merge, release, or deployment is allowed: `UNKNOWN`; do not assume authorization when unconfirmed.
+- Maintainer rules for rejecting/escalating external contributions: see [`contributors.md`](contributors.md); fill in according to the actual project policy.
 
-## 复盘调度与水位
+## Review Scheduling and Watermark
 
-- 每日复盘运行方式 / agent：`UNKNOWN`
-- 运行时间 / 时区：`UNKNOWN`
-- 并发/重叠运行、失败重试、超时/中断和部分写入恢复策略：`UNKNOWN`（按项目实际 scheduler 和存储机制查证）
-- 复盘记录归档位置：`docs/reviews/YYYY-MM-DD.md`（模板约定；项目可由维护者调整）
-- 最近完成复盘的 reviewed-through SHA：`UNKNOWN`（同时更新 `LESSONS.md` 顶部标记）
-- 最后复盘日期：`UNKNOWN`
-- Lesson 晋升门槛：默认 3 个不同复盘日期，见 [`LESSONS.md`](../LESSONS.md)。仅由维护者明确调整。
+- Daily review execution method / agent: `UNKNOWN`
+- Run time / time zone: `UNKNOWN`
+- Concurrent/overlapping runs, failure retries, timeout/interruption, and partial-write recovery strategy: `UNKNOWN` (verify against the project's actual scheduler and storage mechanisms)
+- Review record archive location: `docs/reviews/YYYY-MM-DD.md` (template convention; maintainers may adjust this for the project)
+- SHA reviewed through in the most recent completed review: `UNKNOWN` (also update the top marker in `LESSONS.md`)
+- Last review date: `UNKNOWN`
+- Lesson promotion threshold: 3 different review dates by default; see [`LESSONS.md`](../LESSONS.md). Only maintainers may explicitly adjust it.
 
-## 更新要求
+## Update Requirements
 
-- Bootstrap、CI/脚本或发布方式变化时，核实相关字段并更新本文件。
-- 改动只写已验证事实；保留来源链接或命令路径（如 `package.json`、工作流文件、配置 schema）。
-- 未知项不得因为重复被抄写成事实；被维护者确认的决定记录决策出处，并同步路由入口。
+- Verify relevant fields and update this file when bootstrap, CI/scripts, or the release method changes.
+- Write only verified facts; retain source links or command paths (such as `package.json`, workflow files, and configuration schemas).
+- Do not turn an unknown item into a fact by repeatedly copying it; record the source of maintainer-confirmed decisions and synchronize the routing entry point.

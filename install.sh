@@ -40,6 +40,11 @@ USAGE
 
 SOURCE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 TARGET_DIR="$PWD"
+TRANSACTION_HELPER="$SOURCE_DIR/.agent-maintenance/installer-transaction.py"
+[[ -f "$TRANSACTION_HELPER" ]] || {
+  echo "ERROR: missing installer transaction helper: .agent-maintenance/installer-transaction.py" >&2
+  exit 2
+}
 INSTALL_HOOKS=1
 BOOTSTRAP_AGENT=""
 
@@ -108,12 +113,19 @@ files=(
   LESSONS.md
   install.sh
   .agent-maintenance/session-start.sh
+  .agent-maintenance/installer-transaction.py
   .github/PULL_REQUEST_TEMPLATE.md
 )
 while IFS= read -r -d '' source_path; do
   files+=("${source_path#"$SOURCE_DIR"/}")
 done < <(find "$SOURCE_DIR/docs" "$SOURCE_DIR/prompts" -type f \
   ! -path "$SOURCE_DIR/docs/source-and-extraction.md" -print0)
+for relative_path in "${files[@]}"; do
+  [[ -f "$SOURCE_DIR/$relative_path" ]] || {
+    echo "ERROR: missing installer source file: $relative_path" >&2
+    exit 2
+  }
+done
 
 validate_destination_parents() {
   local relative_path="$1"
@@ -163,7 +175,7 @@ try:
         if not stat.S_ISREG(info.st_mode):
             raise OSError("settings path is not a regular file")
         if info.st_nlink > 1:
-            raise OSError("atomic replacement would break hard links")
+            raise OSError("hard-linked settings files are not accepted")
         for name in os.listxattr(filename, follow_symlinks=False):
             os.getxattr(filename, name, follow_symlinks=False)
         with open(filename, encoding="utf-8") as handle:
@@ -192,6 +204,25 @@ for session in sessions:
     if isinstance(session, dict) and not isinstance(session.get("hooks", []), list):
         print(f"ERROR: {filename}: each SessionStart 'hooks' value must be a JSON array; no files were installed.", file=sys.stderr)
         sys.exit(3)
+
+hook_commands = {
+    "codex": 'bash "$(git rev-parse --show-toplevel)/.agent-maintenance/session-start.sh" codex',
+    "claude": 'bash "${CLAUDE_PROJECT_DIR}/.agent-maintenance/session-start.sh" claude',
+}
+registered = any(
+    isinstance(session, dict)
+    and any(
+        isinstance(handler, dict) and handler.get("command") == hook_commands[provider]
+        for handler in session.get("hooks", [])
+    )
+    for session in sessions
+)
+if os.path.lexists(filename) and not registered:
+    print(
+        f"ERROR: cannot safely merge into pre-existing {filename}: POSIX has no portable conditional replace for non-cooperative writers; file preserved. Add the hook manually or use --no-hooks; no files were installed.",
+        file=sys.stderr,
+    )
+    sys.exit(3)
 PY
 }
 
@@ -215,8 +246,123 @@ if [[ "$INSTALL_HOOKS" == 1 ]]; then
   fi
 fi
 
+# Detect predictable destination permission failures before writing any template
+# files or provider settings. This checks only paths that would actually change.
+preflight_write_access() {
+  python3 - "$SOURCE_DIR" "$TARGET_DIR" "$INSTALL_HOOKS" "${files[@]}" <<'PY'
+import filecmp
+import json
+import os
+import stat
+import sys
+
+source_dir, target_dir, hooks_enabled, *relative_files = sys.argv[1:]
+needed_directories = set()
+
+def needs_managed_agents_write(source, destination):
+    try:
+        info = os.lstat(destination)
+    except FileNotFoundError:
+        return False
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
+        return False
+    return not filecmp.cmp(source, destination, shallow=False)
+
+for relative in relative_files:
+    destination = os.path.join(target_dir, relative)
+    if os.path.lexists(destination):
+        if relative == "AGENTS.md" and needs_managed_agents_write(
+            os.path.join(source_dir, relative), destination
+        ):
+            needed_directories.add(os.path.dirname(destination))
+        continue
+    needed_directories.add(os.path.dirname(destination))
+
+if hooks_enabled == "1":
+    hook_commands = {
+        ".codex/hooks.json": 'bash "$(git rev-parse --show-toplevel)/.agent-maintenance/session-start.sh" codex',
+        ".claude/settings.json": 'bash "${CLAUDE_PROJECT_DIR}/.agent-maintenance/session-start.sh" claude',
+    }
+    for relative, command in hook_commands.items():
+        filename = os.path.join(target_dir, relative)
+        config = {}
+        if os.path.lexists(filename):
+            with open(filename, encoding="utf-8") as handle:
+                original = os.fstat(handle.fileno())
+                try:
+                    config = json.load(handle)
+                finally:
+                    os.utime(
+                        handle.fileno(),
+                        ns=(original.st_atime_ns, original.st_mtime_ns),
+                    )
+        sessions = config.get("hooks", {}).get("SessionStart", [])
+        already_registered = any(
+            isinstance(session, dict)
+            and any(
+                isinstance(handler, dict) and handler.get("command") == command
+                for handler in session.get("hooks", [])
+            )
+            for session in sessions
+        )
+        if not already_registered:
+            needed_directories.add(os.path.dirname(filename))
+
+for directory in sorted(needed_directories):
+    candidate = directory
+    while not os.path.lexists(candidate):
+        parent = os.path.dirname(candidate)
+        if parent == candidate:
+            break
+        candidate = parent
+    try:
+        info = os.lstat(candidate)
+        if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+            raise OSError("nearest existing parent is not a real directory")
+        if not os.access(candidate, os.W_OK | os.X_OK):
+            raise PermissionError("directory is not writable and searchable")
+    except OSError as exc:
+        relative = os.path.relpath(directory, target_dir)
+        print(
+            f"ERROR: destination directory is not writable ({relative}): {exc}; no files were installed.",
+            file=sys.stderr,
+        )
+        sys.exit(3)
+PY
+}
+
+preflight_write_access
+
 work_dir="$(mktemp -d)"
-trap 'rm -rf "$work_dir"' EXIT
+trap 'rm -rf -- "$work_dir"' EXIT
+transaction_state="$work_dir/transaction.json"
+python3 "$TRANSACTION_HELPER" init "$TARGET_DIR" "$transaction_state"
+transaction_active=1
+retain_work_dir=0
+
+rollback_transaction() {
+  python3 "$TRANSACTION_HELPER" rollback "$TARGET_DIR" "$transaction_state"
+}
+
+installer_cleanup() {
+  local status=$?
+  trap - EXIT
+  if ((status != 0 && transaction_active)); then
+    echo "ERROR: installation write failed; attempting to roll back this install." >&2
+    if ! rollback_transaction; then
+      echo "ERROR: rollback was incomplete; uncertain files and recovery entries were preserved rather than deleted." >&2
+      retain_work_dir=1
+    fi
+  fi
+  if ((retain_work_dir)); then
+    echo "ERROR: rollback snapshots retained for recovery at: $work_dir" >&2
+  else
+    rm -rf -- "$work_dir"
+  fi
+  exit "$status"
+}
+
+trap installer_cleanup EXIT
 managed_route_file="$work_dir/agents-routing.md"
 cat > "$managed_route_file" <<'ROUTE'
 <!-- BEGIN SELF-EVOLUTION-FLYWHEEL MANAGED ROUTING -->
@@ -273,62 +419,6 @@ sys.exit(process.wait())
 PY
 }
 
-preserve_managed_agents_metadata() {
-  python3 - "$1" "$2" <<'PY'
-import os
-import stat
-import sys
-
-source, staged = sys.argv[1:]
-try:
-    original = os.stat(source, follow_symlinks=False)
-    if not stat.S_ISREG(original.st_mode):
-        raise OSError("source is no longer a regular file")
-    if original.st_nlink > 1:
-        raise OSError("atomic replacement would break hard links")
-
-    attributes = {
-        name: os.getxattr(source, name, follow_symlinks=False)
-        for name in os.listxattr(source, follow_symlinks=False)
-    }
-    staged_stat = os.stat(staged, follow_symlinks=False)
-    if (staged_stat.st_uid, staged_stat.st_gid) != (original.st_uid, original.st_gid):
-        os.chown(staged, original.st_uid, original.st_gid, follow_symlinks=False)
-    os.chmod(staged, stat.S_IMODE(original.st_mode), follow_symlinks=False)
-
-    for name in os.listxattr(staged, follow_symlinks=False):
-        if name not in attributes:
-            os.removexattr(staged, name, follow_symlinks=False)
-    for name, value in attributes.items():
-        os.setxattr(staged, name, value, follow_symlinks=False)
-    os.utime(
-        staged,
-        ns=(original.st_atime_ns, original.st_mtime_ns),
-        follow_symlinks=False,
-    )
-
-    result = os.stat(staged, follow_symlinks=False)
-    result_attributes = {
-        name: os.getxattr(staged, name, follow_symlinks=False)
-        for name in os.listxattr(staged, follow_symlinks=False)
-    }
-    if (
-        (result.st_uid, result.st_gid) != (original.st_uid, original.st_gid)
-        or stat.S_IMODE(result.st_mode) != stat.S_IMODE(original.st_mode)
-        or result.st_atime_ns != original.st_atime_ns
-        or result.st_mtime_ns != original.st_mtime_ns
-        or result_attributes != attributes
-    ):
-        raise OSError("staged metadata did not match the original")
-except (OSError, AttributeError, NotImplementedError):
-    print(
-        "ERROR: could not safely preserve AGENTS.md ownership, permissions, ACLs, or extended attributes; left unchanged.",
-        file=sys.stderr,
-    )
-    sys.exit(1)
-PY
-}
-
 prepare_managed_agents() {
   local destination_path="$1"
   local baseline="$work_dir/agents.original"
@@ -338,11 +428,11 @@ prepare_managed_agents() {
     echo "PRESERVED existing file (Python 3 is required to safely manage AGENTS.md): AGENTS.md" >&2
     return 1
   fi
-  if ! cp -p "$destination_path" "$baseline"; then
+  if ! python3 "$TRANSACTION_HELPER" snapshot "$TARGET_DIR" "AGENTS.md" "$baseline"; then
     echo "PRESERVED existing file (could not snapshot it safely): AGENTS.md" >&2
     return 1
   fi
-  stage_file="$(mktemp "$TARGET_DIR/.AGENTS.md.XXXXXX")"
+  stage_file="$(mktemp "$work_dir/agents-stage.XXXXXX")"
   action_file="$work_dir/agents-action"
   if ! python3 - "$baseline" "$managed_route_file" "$stage_file" "$action_file" <<'PY'
 import sys
@@ -444,27 +534,15 @@ PY
     rm -f "$stage_file"
     return 1
   fi
-  if ! preserve_managed_agents_metadata "$destination_path" "$stage_file"; then
-    echo "PRESERVED AGENTS.md: could not safely preserve the original file metadata; left unchanged." >&2
-    rm -f "$stage_file"
-    return 1
-  fi
-  if ! mv -f "$stage_file" "$destination_path"; then
-    echo "PRESERVED AGENTS.md: could not apply the confirmed managed routing change." >&2
-    rm -f "$stage_file"
-    return 1
-  fi
-  if [[ "$action" == "insert" ]]; then
-    echo "INSERTED managed routing block at the beginning of AGENTS.md"
-  else
-    echo "UPDATED managed routing block in AGENTS.md"
-  fi
-  return 0
+  echo "PRESERVED AGENTS.md: safe automatic replacement is unavailable for non-cooperative writers; merge the reviewed block manually." >&2
+  rm -f "$stage_file"
+  return 3
 }
 
 prompt_ready=0
 conflicts=()
 confirmation_required=0
+manual_merge_required=0
 for relative_path in "${files[@]}"; do
   source_path="$SOURCE_DIR/$relative_path"
   destination_path="$TARGET_DIR/$relative_path"
@@ -485,6 +563,8 @@ for relative_path in "${files[@]}"; do
         conflicts+=("$relative_path")
         if ((managed_status == 2)); then
           confirmation_required=1
+        elif ((managed_status == 3)); then
+          manual_merge_required=1
         fi
       fi
       continue
@@ -499,8 +579,17 @@ for relative_path in "${files[@]}"; do
     continue
   fi
 
-  mkdir -p "$(dirname "$destination_path")"
-  cp -p "$source_path" "$destination_path"
+  if copy_result="$(python3 "$TRANSACTION_HELPER" copy "$TARGET_DIR" "$relative_path" "$source_path" "$transaction_state")"; then
+    :
+  else
+    copy_status=$?
+    if ((copy_status == 10)); then
+      echo "PRESERVED existing file (appeared during installation): $relative_path"
+      conflicts+=("$relative_path")
+      continue
+    fi
+    exit "$copy_status"
+  fi
   echo "INSTALLED $relative_path"
   [[ "$relative_path" == "prompts/bootstrap-project.md" ]] && prompt_ready=1
 done
@@ -508,133 +597,20 @@ done
 merge_hook_config() {
   local provider="$1"
   local settings_path="$2"
-  python3 - "$provider" "$settings_path" <<'PY'
-import json
-import os
-import stat
-import sys
-import tempfile
-from pathlib import Path
-
-provider, filename = sys.argv[1], Path(sys.argv[2])
-if provider == "codex":
-    entry = {
-        "matcher": "startup|resume|clear|compact|fork",
-        "hooks": [{
-            "type": "command",
-            "command": 'bash "$(git rev-parse --show-toplevel)/.agent-maintenance/session-start.sh" codex',
-            "timeout": 5,
-            "additionalContextLimit": 1200,
-        }],
-    }
-else:
-    entry = {
-        "matcher": "startup|resume|clear|compact|fork",
-        "hooks": [{
-            "type": "command",
-            "command": 'bash "${CLAUDE_PROJECT_DIR}/.agent-maintenance/session-start.sh" claude',
-        }],
-    }
-
-if os.path.lexists(filename):
-    try:
-        original = os.lstat(filename)
-        if stat.S_ISLNK(original.st_mode):
-            raise OSError("settings file is a symbolic link")
-        if not stat.S_ISREG(original.st_mode):
-            raise OSError("settings path is not a regular file")
-        if original.st_nlink > 1:
-            raise OSError("atomic replacement would break hard links")
-        attributes = {
-            name: os.getxattr(filename, name, follow_symlinks=False)
-            for name in os.listxattr(filename, follow_symlinks=False)
-        }
-        with filename.open(encoding="utf-8") as handle:
-            try:
-                config = json.load(handle)
-            finally:
-                os.utime(handle.fileno(), ns=(original.st_atime_ns, original.st_mtime_ns))
-    except Exception as exc:
-        print(f"ERROR: cannot safely parse {filename}: {exc}", file=sys.stderr)
-        print("       No settings were changed; merge the hook manually.", file=sys.stderr)
-        sys.exit(3)
-    old_mode = stat.S_IMODE(original.st_mode)
-else:
-    config, old_mode, original, attributes = {}, 0o644, None, {}
-
-if not isinstance(config, dict):
-    print(f"ERROR: {filename} must contain a JSON object; left untouched.", file=sys.stderr)
-    sys.exit(3)
-hooks = config.setdefault("hooks", {})
-if not isinstance(hooks, dict):
-    print(f"ERROR: {filename}: 'hooks' must be a JSON object; left untouched.", file=sys.stderr)
-    sys.exit(3)
-sessions = hooks.setdefault("SessionStart", [])
-if not isinstance(sessions, list):
-    print(f"ERROR: {filename}: 'hooks.SessionStart' must be a JSON array; left untouched.", file=sys.stderr)
-    sys.exit(3)
-
-command = entry["hooks"][0]["command"]
-for existing in sessions:
-    if not isinstance(existing, dict):
-        continue
-    existing_handlers = existing.get("hooks", [])
-    if not isinstance(existing_handlers, list):
-        continue
-    for handler in existing_handlers:
-        if isinstance(handler, dict) and handler.get("command") == command:
-            print(f"HOOK PRESENT {filename}")
-            sys.exit(0)
-
-sessions.append(entry)
-filename.parent.mkdir(parents=True, exist_ok=True)
-fd, temp_name = tempfile.mkstemp(prefix=f".{filename.name}.", dir=filename.parent)
-try:
-    with os.fdopen(fd, "w", encoding="utf-8") as handle:
-        json.dump(config, handle, ensure_ascii=False, indent=2)
-        handle.write("\n")
-    if original is not None:
-        os.chown(temp_name, original.st_uid, original.st_gid, follow_symlinks=False)
-    os.chmod(temp_name, old_mode)
-    for name in os.listxattr(temp_name, follow_symlinks=False):
-        if name not in attributes:
-            os.removexattr(temp_name, name, follow_symlinks=False)
-    for name, value in attributes.items():
-        os.setxattr(temp_name, name, value, follow_symlinks=False)
-    if original is not None:
-        os.utime(
-            temp_name,
-            ns=(original.st_atime_ns, original.st_mtime_ns),
-            follow_symlinks=False,
-        )
-        result = os.stat(temp_name, follow_symlinks=False)
-        result_attributes = {
-            name: os.getxattr(temp_name, name, follow_symlinks=False)
-            for name in os.listxattr(temp_name, follow_symlinks=False)
-        }
-        if (
-            (result.st_uid, result.st_gid) != (original.st_uid, original.st_gid)
-            or stat.S_IMODE(result.st_mode) != stat.S_IMODE(original.st_mode)
-            or result.st_atime_ns != original.st_atime_ns
-            or result.st_mtime_ns != original.st_mtime_ns
-            or result_attributes != attributes
-        ):
-            raise OSError("staged settings metadata did not match the original")
-    os.replace(temp_name, filename)
-except Exception:
-    try:
-        os.unlink(temp_name)
-    except OSError:
-        pass
-    raise
-print(f"HOOK ADDED {filename}")
-PY
+  local relative_path="${settings_path#"$TARGET_DIR"/}"
+  local result
+  result="$(python3 "$TRANSACTION_HELPER" merge-hook "$TARGET_DIR" "$provider" "$relative_path" "$transaction_state")" || return $?
+  printf '%s %s\n' "$result" "$settings_path"
 }
 
 if [[ "$INSTALL_HOOKS" == 1 ]]; then
   merge_hook_config codex "$TARGET_DIR/.codex/hooks.json"
   merge_hook_config claude "$TARGET_DIR/.claude/settings.json"
 fi
+
+# All file and provider writes succeeded. Later notices, optional bootstrap launch,
+# or a confirmation-incomplete exit must not undo an otherwise completed install.
+transaction_active=0
 
 if ((${#conflicts[@]})); then
   echo
@@ -650,6 +626,11 @@ Startup hooks are registered in project-local settings. They only check for
 run shell commands from the project or fetch network content. Codex/Claude Code
 may require you to review/trust the project hook before it runs. See docs/installation.md.
 NOTICE
+fi
+
+if ((manual_merge_required)); then
+  echo "ERROR: installation incomplete: the reviewed AGENTS.md block was not applied because conditional replacement is unavailable; merge it manually." >&2
+  exit 4
 fi
 
 if ((confirmation_required)); then

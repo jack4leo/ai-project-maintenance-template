@@ -54,6 +54,24 @@ else:
     Path(output_path).write_bytes(output)
     raise SystemExit("installer did not finish within 60 seconds")
 
+# The child may exit while its final diagnostics are still queued on the PTY.
+last_output = time.monotonic()
+drain_deadline = last_output + 1
+while time.monotonic() < drain_deadline:
+    ready, _, _ = select.select([master], [], [], 0.1)
+    if not ready:
+        if time.monotonic() - last_output >= 0.2:
+            break
+        continue
+    try:
+        chunk = os.read(master, 4096)
+    except OSError:
+        break
+    if not chunk:
+        break
+    output.extend(chunk)
+    last_output = time.monotonic()
+
 Path(output_path).write_bytes(output)
 if not sent_answer:
     raise SystemExit("installer did not display its confirmation prompt")
@@ -98,6 +116,321 @@ cmp -s "$TMP_DIR/claude-before-invalid.json" "$invalid_claude_target/.claude/set
   || fail "installer changed invalid Claude settings"
 grep -Fq 'no files were installed' "$TMP_DIR/invalid-claude.log" \
   || fail "cross-provider preflight failure was not reported"
+
+# Fail the transaction journal's atomic publication before any project write.
+journal_failure_modules="$TMP_DIR/journal-failure-modules"
+mkdir -p "$journal_failure_modules"
+cat > "$journal_failure_modules/sitecustomize.py" <<'PY'
+import os
+
+_replace = os.replace
+def _fail_journal(src, dst, *args, **kwargs):
+    if os.path.basename(os.fspath(dst)) == "transaction.json":
+        raise OSError("injected transaction journal failure")
+    return _replace(src, dst, *args, **kwargs)
+os.replace = _fail_journal
+PY
+journal_failure_target="$TMP_DIR/journal-failure-target"
+init_git_target "$journal_failure_target"
+if PYTHONPATH="$journal_failure_modules" bash "$REPO_ROOT/install.sh" --target "$journal_failure_target" > "$TMP_DIR/journal-failure.log" 2>&1; then
+  fail "installer succeeded without a transaction journal"
+fi
+grep -Fq 'injected transaction journal failure' "$TMP_DIR/journal-failure.log" \
+  || fail "transaction journal failure was not visible"
+[[ ! -e "$journal_failure_target/AGENTS.md" && ! -e "$journal_failure_target/.codex/hooks.json" \
+    && ! -e "$journal_failure_target/.claude/settings.json" ]] \
+  || fail "transaction journal failure occurred after project files were written"
+
+journal_update_modules="$TMP_DIR/journal-update-modules"
+mkdir -p "$journal_update_modules"
+cat > "$journal_update_modules/sitecustomize.py" <<'PY'
+import os
+
+_replace = os.replace
+def _fail_nth_journal_update(src, dst, *args, **kwargs):
+    if os.path.basename(os.fspath(dst)) == "transaction.json":
+        counter = os.environ["JOURNAL_REPLACE_COUNTER"]
+        try:
+            with open(counter, encoding="ascii") as handle:
+                count = int(handle.read())
+        except FileNotFoundError:
+            count = 0
+        count += 1
+        with open(counter, "w", encoding="ascii") as handle:
+            handle.write(str(count))
+        if count == int(os.environ["JOURNAL_FAIL_AT"]):
+            raise OSError("injected transaction journal update failure")
+    return _replace(src, dst, *args, **kwargs)
+os.replace = _fail_nth_journal_update
+PY
+journal_update_target="$TMP_DIR/journal-update-target"
+init_git_target "$journal_update_target"
+counter_file="$TMP_DIR/journal-update-counter"
+if PYTHONPATH="$journal_update_modules" JOURNAL_REPLACE_COUNTER="$counter_file" JOURNAL_FAIL_AT=6 \
+    bash "$REPO_ROOT/install.sh" --target "$journal_update_target" > "$TMP_DIR/journal-update.log" 2>&1; then
+  fail "installer succeeded after a transaction journal update failure"
+fi
+grep -Fq 'injected transaction journal update failure' "$TMP_DIR/journal-update.log" \
+  || fail "mid-transaction journal failure was not visible"
+[[ ! -e "$journal_update_target/.agent-maintenance" ]] \
+  || fail "journal update failure left an unrecorded empty directory behind"
+[[ ! -e "$journal_update_target/AGENTS.md" && ! -e "$journal_update_target/CLAUDE.md" \
+    && ! -e "$journal_update_target/LESSONS.md" ]] \
+  || fail "journal update failure left earlier template files at their active paths"
+grep -Fq 'rollback was incomplete' "$TMP_DIR/journal-update.log" \
+  || fail "post-journal-failure recovery status was not made visible"
+recovery_dir="$(sed -n 's/^ERROR: rollback snapshots retained for recovery at: //p' "$TMP_DIR/journal-update.log" | tail -n 1)"
+[[ -n "$recovery_dir" && -f "$recovery_dir/transaction.json" ]] \
+  || fail "post-journal-failure transaction log was not retained"
+
+# Fail the observable AGENTS baseline snapshot output; preserve AGENTS.md while
+# allowing unrelated template files to install and report the conflict.
+snapshot_failure_modules="$TMP_DIR/snapshot-failure-modules"
+mkdir -p "$snapshot_failure_modules"
+cat > "$snapshot_failure_modules/sitecustomize.py" <<'PY'
+import builtins
+import os
+
+_open = builtins.open
+def _fail_agents_snapshot(file, *args, **kwargs):
+    try:
+        path = os.fspath(file)
+    except TypeError:
+        path = ""
+    mode = args[0] if args else kwargs.get("mode", "r")
+    if os.path.basename(path) == "agents.original" and "w" in mode:
+        raise OSError("injected AGENTS baseline snapshot failure")
+    return _open(file, *args, **kwargs)
+builtins.open = _fail_agents_snapshot
+PY
+snapshot_failure_target="$TMP_DIR/snapshot-failure-target"
+mkdir -p "$snapshot_failure_target"
+printf '# Preserve during snapshot failure\n' > "$snapshot_failure_target/AGENTS.md"
+cp "$snapshot_failure_target/AGENTS.md" "$TMP_DIR/snapshot-failure-before.md"
+PYTHONPATH="$snapshot_failure_modules" bash "$REPO_ROOT/install.sh" --target "$snapshot_failure_target" --no-hooks > "$TMP_DIR/snapshot-failure.log" 2>&1
+cmp -s "$TMP_DIR/snapshot-failure-before.md" "$snapshot_failure_target/AGENTS.md" \
+  || fail "AGENTS snapshot failure changed the existing file"
+grep -Fq 'injected AGENTS baseline snapshot failure' "$TMP_DIR/snapshot-failure.log" \
+  || fail "AGENTS snapshot failure was not visible"
+grep -Fq 'Some existing project files were preserved' "$TMP_DIR/snapshot-failure.log" \
+  || fail "AGENTS snapshot failure was not surfaced as a conflict"
+[[ -f "$snapshot_failure_target/CLAUDE.md" ]] \
+  || fail "AGENTS snapshot failure incorrectly blocked unrelated safe template copies"
+
+# A read-only later-provider directory must be rejected before any project file
+# or earlier-provider setting is written. Run as an unprivileged user even when
+# the suite itself is invoked as root so the permission state matches real use.
+readonly_claude_target="$TMP_DIR/readonly-claude-target"
+init_git_target "$readonly_claude_target"
+mkdir -p "$readonly_claude_target/.codex" "$readonly_claude_target/.claude"
+chmod 555 "$readonly_claude_target/.claude"
+python3 - "$REPO_ROOT/install.sh" "$readonly_claude_target" "$TMP_DIR/readonly-claude.log" "$TMP_DIR" <<'PY'
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+installer, target, output_path, temp_root = sys.argv[1:]
+if os.geteuid() == 0:
+    os.chmod(temp_root, 0o755)
+    for path in Path(target).rglob("*"):
+        os.chown(path, 65534, 65534, follow_symlinks=False)
+    os.chown(target, 65534, 65534)
+
+def drop_privileges():
+    os.setgroups([])
+    os.setgid(65534)
+    os.setuid(65534)
+
+with Path(output_path).open("wb") as output:
+    result = subprocess.run(
+        ["bash", installer, "--target", target],
+        stdout=output,
+        stderr=subprocess.STDOUT,
+        preexec_fn=drop_privileges if os.geteuid() == 0 else None,
+    )
+if result.returncode == 0:
+    raise SystemExit("installer accepted a read-only Claude settings directory")
+PY
+chmod 755 "$readonly_claude_target/.claude"
+[[ ! -e "$readonly_claude_target/AGENTS.md" ]] \
+  || fail "read-only Claude target left template files installed"
+[[ ! -e "$readonly_claude_target/.codex/hooks.json" && ! -e "$readonly_claude_target/.claude/settings.json" ]] \
+  || fail "read-only Claude preflight created provider settings"
+grep -Fq 'no files were installed' "$TMP_DIR/readonly-claude.log" \
+  || fail "read-only Claude preflight failure was not reported before installation"
+
+# Simulate a permission change after preflight but before Claude settings can be
+# staged. Earlier template and Codex writes must be rolled back.
+rollback_target="$TMP_DIR/rollback-target"
+init_git_target "$rollback_target"
+mkdir -p "$rollback_target/.codex" "$rollback_target/.claude"
+rollback_python_bin="$TMP_DIR/rollback-python-bin"
+mkdir -p "$rollback_python_bin"
+real_python3="$(command -v python3)"
+cat > "$rollback_python_bin/python3" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ -n "${TEST_INJECT_MODE:-}" && -e "$TEST_CODEX" && ! -e "$TEST_INJECT_MARKER" ]]; then
+  touch "$TEST_INJECT_MARKER"
+  if [[ "$TEST_INJECT_MODE" == "concurrent" ]]; then
+    cat "$TEST_CODEX_EXPECTED" > "$TEST_CODEX"
+    cat "$TEST_AGENTS_EXPECTED" > "$TEST_AGENTS"
+  fi
+  chmod 555 "$TEST_CLAUDE_DIR"
+fi
+exec "$TEST_REAL_PYTHON3" "$@"
+SH
+chmod +x "$rollback_python_bin/python3"
+python3 - "$REPO_ROOT/install.sh" "$rollback_target" "$TMP_DIR/rollback.log" "$TMP_DIR" "$rollback_python_bin" "$real_python3" <<'PY'
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+installer, target, output_path, temp_root, mock_bin, real_python = sys.argv[1:]
+if os.geteuid() == 0:
+    os.chmod(temp_root, 0o755)
+    for root in (Path(target), Path(mock_bin)):
+        for path in root.rglob("*"):
+            os.chown(path, 65534, 65534, follow_symlinks=False)
+        os.chown(root, 65534, 65534)
+
+def drop_privileges():
+    os.setgroups([])
+    os.setgid(65534)
+    os.setuid(65534)
+
+environment = os.environ.copy()
+environment["PATH"] = mock_bin + os.pathsep + environment["PATH"]
+environment["TEST_CLAUDE_DIR"] = str(Path(target) / ".claude")
+environment["TEST_CODEX"] = str(Path(target) / ".codex/hooks.json")
+environment["TEST_INJECT_MARKER"] = str(Path(target) / ".test-injected")
+environment["TEST_REAL_PYTHON3"] = real_python
+environment["TEST_INJECT_MODE"] = "rollback"
+with Path(output_path).open("wb") as output:
+    result = subprocess.run(
+        ["bash", installer, "--target", target],
+        stdout=output,
+        stderr=subprocess.STDOUT,
+        env=environment,
+        preexec_fn=drop_privileges if os.geteuid() == 0 else None,
+    )
+if result.returncode == 0:
+    raise SystemExit("injected Claude settings write failure unexpectedly succeeded")
+PY
+chmod 755 "$rollback_target/.claude"
+[[ ! -e "$rollback_target/AGENTS.md" && ! -e "$rollback_target/prompts/bootstrap-project.md" ]] \
+  || fail "mid-install Claude write failure left template files behind"
+[[ ! -e "$rollback_target/.codex/hooks.json" && ! -e "$rollback_target/.claude/settings.json" ]] \
+  || fail "mid-install Claude failure left provider settings at their active paths"
+grep -Fq 'attempting to roll back this install' "$TMP_DIR/rollback.log" \
+  || fail "mid-install write failure did not report rollback"
+grep -Fq 'rollback was incomplete' "$TMP_DIR/rollback.log" \
+  || fail "rollback did not disclose preserved recovery entries"
+recovery_dir="$(sed -n 's/^ERROR: rollback snapshots retained for recovery at: //p' "$TMP_DIR/rollback.log" | tail -n 1)"
+[[ -n "$recovery_dir" && -f "$recovery_dir/transaction.json" ]] \
+  || fail "conservative rollback did not retain its recovery journal"
+compgen -G "$rollback_target/.codex/.hooks.json.rollback-*" >/dev/null \
+  || fail "rollback deleted the uncertain Codex inode instead of preserving recovery data"
+
+# If another writer changes a file after this install wrote it, rollback must
+# preserve that writer's version, report incomplete recovery, and retain backups.
+concurrent_target="$TMP_DIR/concurrent-target"
+init_git_target "$concurrent_target"
+mkdir -p "$concurrent_target/.codex" "$concurrent_target/.claude"
+concurrent_expected="$TMP_DIR/concurrent-codex-expected.json"
+printf '{"hooks":{},"external":"concurrent writer"}\n' > "$concurrent_expected"
+concurrent_agents_expected="$TMP_DIR/concurrent-agents-expected.md"
+printf '# External concurrent AGENTS update\n' > "$concurrent_agents_expected"
+python3 - "$REPO_ROOT/install.sh" "$concurrent_target" "$TMP_DIR/concurrent.log" "$TMP_DIR" "$rollback_python_bin" "$real_python3" "$concurrent_expected" "$concurrent_agents_expected" <<'PY'
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+installer, target, output_path, temp_root, mock_bin, real_python, expected, expected_agents = sys.argv[1:]
+if os.geteuid() == 0:
+    os.chmod(temp_root, 0o755)
+    for root in (Path(target), Path(mock_bin)):
+        for path in root.rglob("*"):
+            os.chown(path, 65534, 65534, follow_symlinks=False)
+        os.chown(root, 65534, 65534)
+
+def drop_privileges():
+    os.setgroups([])
+    os.setgid(65534)
+    os.setuid(65534)
+
+environment = os.environ.copy()
+environment["PATH"] = mock_bin + os.pathsep + environment["PATH"]
+environment["TEST_CLAUDE_DIR"] = str(Path(target) / ".claude")
+environment["TEST_CODEX"] = str(Path(target) / ".codex/hooks.json")
+environment["TEST_INJECT_MARKER"] = str(Path(target) / ".test-injected")
+environment["TEST_CODEX_EXPECTED"] = expected
+environment["TEST_AGENTS"] = str(Path(target) / "AGENTS.md")
+environment["TEST_AGENTS_EXPECTED"] = expected_agents
+environment["TEST_REAL_PYTHON3"] = real_python
+environment["TEST_INJECT_MODE"] = "concurrent"
+with Path(output_path).open("wb") as output:
+    result = subprocess.run(
+        ["bash", installer, "--target", target],
+        stdout=output,
+        stderr=subprocess.STDOUT,
+        env=environment,
+        preexec_fn=drop_privileges if os.geteuid() == 0 else None,
+    )
+if result.returncode == 0:
+    raise SystemExit("concurrent Claude write failure unexpectedly succeeded")
+PY
+chmod 755 "$concurrent_target/.claude"
+cmp -s "$concurrent_expected" "$concurrent_target/.codex/hooks.json" \
+  || fail "rollback overwrote a concurrent Codex settings update"
+cmp -s "$concurrent_agents_expected" "$concurrent_target/AGENTS.md" \
+  || fail "rollback deleted a newly installed file after a concurrent edit"
+[[ ! -e "$concurrent_target/.claude/settings.json" ]] \
+  || fail "concurrent write failure created Claude settings in an unwritable directory"
+grep -Fq 'PRESERVED concurrent change; rollback skipped: .codex/hooks.json' "$TMP_DIR/concurrent.log" \
+  || fail "rollback did not report preserving the concurrent Codex update"
+grep -Fq 'PRESERVED concurrent change; rollback skipped: AGENTS.md' "$TMP_DIR/concurrent.log" \
+  || fail "rollback did not report preserving the concurrently edited new file"
+grep -Fq 'rollback was incomplete' "$TMP_DIR/concurrent.log" \
+  || fail "concurrent update did not make incomplete rollback explicit"
+recovery_dir="$(sed -n 's/^ERROR: rollback snapshots retained for recovery at: //p' "$TMP_DIR/concurrent.log" | tail -n 1)"
+[[ -n "$recovery_dir" && -f "$recovery_dir/transaction.json" ]] \
+  || fail "incomplete rollback did not retain its recovery journal"
+
+# Replace a validated parent with a symlink exactly as the first nested write is
+# about to run. The descriptor-relative writer must refuse it and roll back.
+racy_symlink_target="$TMP_DIR/racy-symlink-target"
+racy_symlink_outside="$TMP_DIR/racy-symlink-outside"
+racy_python_bin="$TMP_DIR/racy-python-bin"
+mkdir -p "$racy_symlink_target/docs" "$racy_symlink_outside/automation" "$racy_python_bin"
+cat > "$racy_python_bin/python3" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ -e "$TEST_TARGET/AGENTS.md" && -d "$TEST_TARGET/docs" \
+    && ! -e "$TEST_MARKER" && ! -L "$TEST_TARGET/docs" ]]; then
+  touch "$TEST_MARKER"
+  mv "$TEST_TARGET/docs" "$TEST_TARGET/docs.before-race"
+  ln -s "$TEST_OUTSIDE" "$TEST_TARGET/docs"
+fi
+exec "$TEST_REAL_PYTHON3" "$@"
+SH
+chmod +x "$racy_python_bin/python3"
+if PATH="$racy_python_bin:$PATH" TEST_TARGET="$racy_symlink_target" \
+    TEST_OUTSIDE="$racy_symlink_outside" TEST_REAL_PYTHON3="$real_python3" \
+    TEST_MARKER="$racy_symlink_target/.test-injected" \
+    bash "$REPO_ROOT/install.sh" --target "$racy_symlink_target" --no-hooks \
+    > "$TMP_DIR/racy-symlink.log" 2>&1; then
+  fail "installer accepted a parent replaced by a symlink after preflight"
+fi
+[[ ! -e "$racy_symlink_outside/automation/runner-contract.md" ]] \
+  || fail "post-preflight symlink replacement wrote outside the target"
+[[ ! -e "$racy_symlink_target/AGENTS.md" ]] \
+  || fail "post-preflight symlink refusal did not roll back earlier template writes"
+grep -Fq 'installation write failed; attempting to roll back' "$TMP_DIR/racy-symlink.log" \
+  || fail "post-preflight symlink refusal did not run transactional rollback"
 
 # Existing destination parents must be real directories, not symlinks outside the project.
 symlink_parent_target="$TMP_DIR/symlink-parent-target"
@@ -144,11 +477,13 @@ cmp -s "$TMP_DIR/settings-link-outside-before.json" "$settings_link_outside" \
 grep -Fq 'settings file is a symbolic link' "$TMP_DIR/settings-link.log" \
   || fail "settings symlink rejection was not clear"
 
-# Hook JSON replacement preserves existing ownership, mode, timestamps and xattrs.
+# Existing hook JSON that would need modification is refused before project writes;
+# its content, ownership, mode, timestamps and xattrs must remain intact.
 hook_metadata_target="$TMP_DIR/hook-metadata-target"
 init_git_target "$hook_metadata_target"
 mkdir -p "$hook_metadata_target/.claude"
 printf '{"hooks":{}}\n' > "$hook_metadata_target/.claude/settings.json"
+cp "$hook_metadata_target/.claude/settings.json" "$TMP_DIR/hook-settings-original.json"
 python3 - "$hook_metadata_target/.claude/settings.json" "$TMP_DIR/hook-metadata-expected.json" <<'PY'
 import errno
 import json
@@ -197,18 +532,29 @@ expected_path.write_text(json.dumps({
     "xattr_supported": xattr_supported,
 }), encoding="utf-8")
 PY
-bash "$REPO_ROOT/install.sh" --target "$hook_metadata_target" > "$TMP_DIR/hook-metadata.log" 2>&1 \
-  || fail "hook merge failed while preserving metadata"
-python3 - "$hook_metadata_target/.claude/settings.json" "$TMP_DIR/hook-metadata-expected.json" <<'PY'
+if bash "$REPO_ROOT/install.sh" --target "$hook_metadata_target" > "$TMP_DIR/hook-metadata.log" 2>&1; then
+  fail "installer replaced pre-existing hook settings without conditional update support"
+fi
+[[ ! -e "$hook_metadata_target/AGENTS.md" ]] \
+  || fail "unsafe existing hook settings were detected after template writes"
+grep -Fq 'cannot safely merge into pre-existing' "$TMP_DIR/hook-metadata.log" \
+  || fail "unsafe existing settings refusal was not reported"
+python3 - "$hook_metadata_target/.claude/settings.json" "$TMP_DIR/hook-metadata-expected.json" "$TMP_DIR/hook-settings-original.json" <<'PY'
 import json
 import os
 import stat
 import sys
 from pathlib import Path
 
-filename, expected_path = map(Path, sys.argv[1:])
+filename, expected_path, original_path = map(Path, sys.argv[1:])
 expected = json.loads(expected_path.read_text(encoding="utf-8"))
 info = os.stat(filename)
+fd = os.open(filename, os.O_RDONLY | getattr(os, "O_NOATIME", 0))
+try:
+    actual_bytes = os.read(fd, 1024 * 1024)
+finally:
+    os.close(fd)
+assert actual_bytes == original_path.read_bytes(), "safe refusal changed existing settings bytes"
 assert (info.st_uid, info.st_gid) == (expected["uid"], expected["gid"]), "hook settings owner or group changed"
 assert stat.S_IMODE(info.st_mode) == expected["mode"], "hook settings permissions changed"
 assert info.st_atime_ns == expected["atime_ns"], "hook settings atime changed"
@@ -252,33 +598,35 @@ cmp -s "$TMP_DIR/original-session-start.sh" "$conflict_target/.agent-maintenance
 [[ ! -e "$conflict_target/.codex/hooks.json" ]] || fail "--no-hooks registered a Codex hook"
 [[ ! -e "$conflict_target/.claude/settings.json" ]] || fail "--no-hooks registered a Claude hook"
 
-# A differing AGENTS.md is never replaced silently: show the complete proposed
-# diff, ask on the controlling terminal, and insert the managed block at line 1.
+# A differing AGENTS.md is never replaced silently. Even after confirmation,
+# the installer fails closed because portable conditional replacement is unavailable.
 agents_target="$TMP_DIR/agents-target"
 mkdir -p "$agents_target"
 printf '# Maintainer-owned guidance\n\nKeep this text byte-for-byte.\n' > "$agents_target/AGENTS.md"
 cp "$agents_target/AGENTS.md" "$TMP_DIR/agents-before.md"
-run_installer_in_pty "$REPO_ROOT/install.sh" "$agents_target" y "$TMP_DIR/agents-insert.log"
+if run_installer_in_pty "$REPO_ROOT/install.sh" "$agents_target" y "$TMP_DIR/agents-insert.log"; then
+  fail "installer updated a pre-existing AGENTS.md without conditional replacement"
+else
+  [[ "$?" == 4 ]] || fail "unsafe AGENTS.md update did not return incomplete status 4"
+fi
 grep -Fq -- '--- AGENTS.md (current)' "$TMP_DIR/agents-insert.log" \
   || fail "AGENTS.md proposed diff was not displayed"
 grep -Fq 'Insert the managed routing block at the beginning of AGENTS.md? [y/N]' "$TMP_DIR/agents-insert.log" \
   || fail "AGENTS.md insertion did not request maintainer confirmation"
+cmp -s "$TMP_DIR/agents-before.md" "$agents_target/AGENTS.md" \
+  || fail "confirmed AGENTS.md update changed the maintainer-owned file"
+[[ -f "$agents_target/prompts/bootstrap-project.md" ]] \
+  || fail "AGENTS.md preservation prevented installation of unrelated templates"
 python3 - "$agents_target/AGENTS.md" "$TMP_DIR/agents-before.md" <<'PY'
 import sys
 from pathlib import Path
 
 installed, original = map(Path, sys.argv[1:])
-text = installed.read_text(encoding="utf-8")
-before = original.read_text(encoding="utf-8")
-begin = "<!-- BEGIN SELF-EVOLUTION-FLYWHEEL MANAGED ROUTING -->"
-end = "<!-- END SELF-EVOLUTION-FLYWHEEL MANAGED ROUTING -->"
-assert text.startswith(begin + "\n"), "managed block was not inserted at the first line"
-assert text.count(begin) == 1 and text.count(end) == 1, "managed block markers are not unique"
-assert text.endswith("\n" + before), "maintainer-owned AGENTS.md content was not preserved"
+assert installed.read_bytes() == original.read_bytes(), "AGENTS.md bytes changed"
 PY
 
-# Updating a managed block must preserve the existing file owner, mode, and
-# extended attributes (including ACLs where the platform exposes them).
+# A confirmed update of a pre-existing managed block must fail closed; its
+# owner, mode, and extended attributes (including ACLs) remain untouched.
 metadata_target="$TMP_DIR/agents-metadata-target"
 mkdir -p "$metadata_target"
 printf '# Preserve file metadata\n' > "$metadata_target/AGENTS.md"
@@ -331,8 +679,9 @@ expected_path.write_text(
     encoding="utf-8",
 )
 PY
-run_installer_in_pty "$REPO_ROOT/install.sh" "$metadata_target" y "$TMP_DIR/agents-metadata.log" \
-  || fail "confirming a managed AGENTS.md metadata update failed"
+if run_installer_in_pty "$REPO_ROOT/install.sh" "$metadata_target" y "$TMP_DIR/agents-metadata.log"; then
+  fail "installer updated pre-existing AGENTS.md without conditional replacement"
+fi
 python3 - "$metadata_target/AGENTS.md" "$TMP_DIR/metadata-expected.json" <<'PY'
 import json
 import os
@@ -343,6 +692,12 @@ from pathlib import Path
 filename, expected_path = map(Path, sys.argv[1:])
 expected = json.loads(expected_path.read_text(encoding="utf-8"))
 actual = os.stat(filename)
+fd = os.open(filename, os.O_RDONLY | getattr(os, "O_NOATIME", 0))
+try:
+    original_bytes = os.read(fd, 1024 * 1024)
+finally:
+    os.close(fd)
+assert original_bytes == b"# Preserve file metadata\n", "safe refusal changed AGENTS.md bytes"
 assert (actual.st_uid, actual.st_gid) == (expected["uid"], expected["gid"]), "AGENTS.md owner or group changed"
 assert stat.S_IMODE(actual.st_mode) == expected["mode"], "AGENTS.md permissions changed"
 if expected["xattr_supported"]:
@@ -357,8 +712,11 @@ mkdir -p "$agents_hardlink_target"
 printf '# Shared inode must remain intact\n' > "$agents_hardlink_target/AGENTS.md"
 ln "$agents_hardlink_target/AGENTS.md" "$agents_hardlink_target/AGENTS.md.shared"
 cp "$agents_hardlink_target/AGENTS.md" "$TMP_DIR/agents-hardlink-before.md"
-run_installer_in_pty "$REPO_ROOT/install.sh" "$agents_hardlink_target" y "$TMP_DIR/agents-hardlink.log" \
-  || fail "hard-linked AGENTS.md refusal unexpectedly failed the installer"
+if run_installer_in_pty "$REPO_ROOT/install.sh" "$agents_hardlink_target" y "$TMP_DIR/agents-hardlink.log"; then
+  fail "hard-linked AGENTS.md update did not report the incomplete safe refusal"
+else
+  [[ "$?" == 4 ]] || fail "hard-linked AGENTS.md refusal returned an unexpected status"
+fi
 cmp -s "$TMP_DIR/agents-hardlink-before.md" "$agents_hardlink_target/AGENTS.md" \
   || fail "hard-linked AGENTS.md was replaced"
 python3 - "$agents_hardlink_target/AGENTS.md" "$agents_hardlink_target/AGENTS.md.shared" <<'PY'
@@ -440,15 +798,17 @@ cmp -s "$TMP_DIR/agents-decline-before.md" "$agents_decline_target/AGENTS.md" \
 grep -Fq 'managed routing change was not confirmed' "$TMP_DIR/agents-decline.log" \
   || fail "declined AGENTS.md insertion was not reported"
 
-# Re-running is idempotent. A changed template updates only the marked block
-# after a fresh diff/confirmation, preserving all user-owned surrounding text.
-bash "$REPO_ROOT/install.sh" --target "$agents_target" --no-hooks > "$TMP_DIR/agents-idempotent.log" 2>&1
-grep -Fq 'UNCHANGED managed routing block in AGENTS.md' "$TMP_DIR/agents-idempotent.log" \
-  || fail "current managed AGENTS.md block was not recognized as idempotent"
-if grep -Fq '[y/N]' "$TMP_DIR/agents-idempotent.log"; then
-  fail "idempotent AGENTS.md installation unexpectedly requested confirmation"
+# A byte-identical AGENTS.md is left alone without a prompt; differing content
+# requires manual merge because a conditional atomic replacement is unavailable.
+agents_identical_target="$TMP_DIR/agents-identical-target"
+mkdir -p "$agents_identical_target"
+cp "$REPO_ROOT/AGENTS.md" "$agents_identical_target/AGENTS.md"
+bash "$REPO_ROOT/install.sh" --target "$agents_identical_target" --no-hooks > "$TMP_DIR/agents-identical.log" 2>&1
+grep -Fq 'UNCHANGED AGENTS.md' "$TMP_DIR/agents-identical.log" \
+  || fail "byte-identical AGENTS.md was not recognized as unchanged"
+if grep -Fq '[y/N]' "$TMP_DIR/agents-identical.log"; then
+  fail "byte-identical AGENTS.md unexpectedly requested confirmation"
 fi
-
 updated_source="$TMP_DIR/updated-source"
 mkdir -p "$updated_source"
 tar -cf - --exclude='./.git' -C "$REPO_ROOT" . | tar -xf - -C "$updated_source"
@@ -463,19 +823,23 @@ new = "- Follow repository evidence, permission boundaries, and the target proje
 assert old in text, "test fixture could not find the managed route line"
 path.write_text(text.replace(old, new, 1), encoding="utf-8")
 PY
-run_installer_in_pty "$updated_source/install.sh" "$agents_target" y "$TMP_DIR/agents-update.log" \
-  || fail "confirming a managed AGENTS.md update failed"
+cat > "$agents_target/AGENTS.md" <<'AGENTS'
+<!-- BEGIN SELF-EVOLUTION-FLYWHEEL MANAGED ROUTING -->
+- Follow repository evidence, documented validation, and permission boundaries; keep changes focused.
+<!-- END SELF-EVOLUTION-FLYWHEEL MANAGED ROUTING -->
+
+# Maintainer-owned guidance
+AGENTS
+cp "$agents_target/AGENTS.md" "$TMP_DIR/agents-update-before.md"
+if run_installer_in_pty "$updated_source/install.sh" "$agents_target" y "$TMP_DIR/agents-update.log"; then
+  fail "installer updated a pre-existing managed block without conditional replacement"
+else
+  [[ "$?" == 4 ]] || fail "unsafe managed-block update did not return incomplete status 4"
+fi
 grep -Fq 'Update the existing managed routing block in AGENTS.md? [y/N]' "$TMP_DIR/agents-update.log" \
   || fail "changed managed block did not request confirmation"
-grep -Fq 'UPDATED managed routing block in AGENTS.md' "$TMP_DIR/agents-update.log" \
-  || fail "confirmed managed block was not updated"
-grep -Fq 'Follow repository evidence, permission boundaries, and the target project' "$agents_target/AGENTS.md" \
-  || fail "updated managed routing text was not installed"
-grep -Fq '# Maintainer-owned guidance' "$agents_target/AGENTS.md" \
-  || fail "managed block update damaged user-owned AGENTS.md content"
-bash "$updated_source/install.sh" --target "$agents_target" --no-hooks > "$TMP_DIR/agents-update-idempotent.log" 2>&1
-grep -Fq 'UNCHANGED managed routing block in AGENTS.md' "$TMP_DIR/agents-update-idempotent.log" \
-  || fail "updated managed block was not idempotent"
+cmp -s "$TMP_DIR/agents-update-before.md" "$agents_target/AGENTS.md" \
+  || fail "confirmed managed-block update changed AGENTS.md"
 
 # Hook-enabled installation rejects non-Git targets; --no-hooks can install there.
 non_git_target="$TMP_DIR/non-git-target"
@@ -573,5 +937,7 @@ grep -Fq 'Cloning Self-Evolution Flywheel source' "$TMP_DIR/remote.log" \
   || fail "pipe installer did not clone the source checkout"
 [[ -f "$remote_target/prompts/bootstrap-project.md" ]] \
   || fail "pipe installer did not install the bootstrap prompt"
+
+python3 "$REPO_ROOT/tests/test-installer-races.py"
 
 echo "PASS: installer safety, hook and session-start regression tests"

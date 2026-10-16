@@ -1,33 +1,33 @@
-# 项目维护闭环
+# Project maintenance loop
 
-本机制以“每次变更都读取项目记忆、每次复盘都更新项目记忆”为核心。`AGENTS.md` 负责路由；`docs/subsystems/` 记录当前系统事实；`docs/code-standards.md` 保存通用和已晋升的稳定规则；`LESSONS.md` 保存最近的有证据教训。它们互相链接而不重复定义。
+This mechanism centers on “read project memory for every change, update project memory for every retrospective.” `AGENTS.md` handles routing; `docs/subsystems/` records current system facts; `docs/code-standards.md` stores general and promoted stable rules; `LESSONS.md` stores recent evidence-backed lessons. They link to one another without redefining the same content.
 
-## 1. 一次性初始化（Bootstrap）
+## 1. One-time initialization (Bootstrap)
 
-Agent 首先查看仓库入口、现有规则、包/构建清单、CI 工作流、测试配置、代码目录和必要的关键实现。它据此填写 `docs/project-profile.md`，列出已证实的验证命令和权限边界；按运行时职责而非目录名识别子系统；为每个有独立契约的子系统写当前行为参考；将项目中真实存在的约定、CI 检查和安全风险写进 code-standards 与 contributors 文档。所有结论要链接到源码、测试或配置文件。
+The agent first inspects the repository entry points, existing rules, package/build manifests, CI workflows, test configuration, code directories, and necessary key implementations. Based on this, it fills in `docs/project-profile.md`, lists verified validation commands and permission boundaries, identifies subsystems by runtime responsibility rather than directory name, and writes current-behavior references for each subsystem with an independent contract. It records conventions, CI checks, and security risks that actually exist in the project in the code-standards and contributors documents. Every conclusion must link to source, test, or configuration files.
 
-不要把模板中的 `UNKNOWN` 用猜测填满，不要创建并不存在的 release gate，不要复制其他项目的子系统细节。不能验证的内容标注未知；产品取舍和自治权限交给维护者确认。初始化完成前，项目不得把模板规则称为已定制的项目规范。
+Do not fill template `UNKNOWN` values with guesses, create release gates that do not exist, or copy subsystem details from other projects. Mark unverifiable content as unknown; leave product tradeoffs and autonomous permissions for maintainer confirmation. Until initialization is complete, the project must not call the template rules customized project standards.
 
-## 2. 每次开发任务
+## 2. Each development task
 
-开始时按 `AGENTS.md` 读取 profile、Lessons、适用的标准和子系统页。追踪行为从外部入口到状态写入、输出和副作用的完整路径，检查同类入口与边界条件，按实际风险先复现再修改。修复缺陷时，尽量使用报告人实际操作的表面和原始输入复现；条件不足或无法复现时记录具体限制，不把推测写成已解决。代码变更附测试；修复行为时，尽可能验证回归测试在旧行为下会失败。接口、状态、兼容、权限、失败方式发生变化时，同一变更更新所属子系统页。
+At the start, follow `AGENTS.md` to read the profile, Lessons, applicable standards, and subsystem pages. Trace behavior completely from external entry points through state writes, outputs, and side effects; check analogous entry points and boundary conditions; reproduce first and then modify according to actual risk. When fixing a defect, reproduce it using the reporter's actual surface and original inputs where possible; record specific limitations when conditions are insufficient or reproduction is impossible, and do not present speculation as resolved. Include tests with code changes; when fixing behavior, verify where possible that the regression test fails under the old behavior. When interfaces, state, compatibility, permissions, or failure modes change, update the relevant subsystem page in the same change.
 
-完成时在当前审查 HEAD 上执行 profile 规定的检查。提交/PR 必须写实际运行的命令和结果、未运行项及原因、审查的 SHA。若在检查期间 HEAD 改变，对新 HEAD 重新审查和验证。无真实集成或平台环境时，直说没有跑，不得把单元测试替代成真实使用验证。
+When complete, run the checks specified by the profile against the current review HEAD. Commits/PRs must state the commands and results actually run, items not run and why, and the reviewed SHA. If HEAD changes during checking, review and validate the new HEAD again. When no real integration or platform environment is available, say so plainly; do not substitute unit tests for real-use validation.
 
-## 3. PR / 外部贡献审查
+## 3. PR / external contribution review
 
-先读 `docs/contributors.md` 做安全与范围初筛，再根据 code-standards 和 subsystem refs 审查目标。审查不只看 diff：核对声明的行为与调用链、变更范围外但受影响的 sibling case、平台/客户端变体、fallback 或替代实现，以及文档和测试是否相符。若代码、测试、CI 或文档显示规则彼此冲突，报告冲突并修正唯一权威位置。存在项目 profile 中的升级条件、需要 owner 决定的产品问题或超过权限边界的操作时，停在建议阶段。
+Read `docs/contributors.md` first for security and scope triage, then review the target against code-standards and subsystem refs. Do not review only the diff: verify the claimed behavior and call chain, affected sibling cases outside the change scope, platform/client variants, fallbacks or alternative implementations, and consistency of documentation and tests. If code, tests, CI, or documentation show conflicting rules, report the conflict and correct the single authoritative location. When project-profile escalation conditions apply, a product issue requires an owner decision, or an operation exceeds the permission boundary, stop at the recommendation stage.
 
-## 4. 每日提交复盘
+## 4. Daily commit retrospective
 
-每天由有权读取仓库历史和验证结果的 agent 复盘 reviewed-through 之后至最新 HEAD 的提交。优先查三类：重复返工、不该合并/发布的变更、验证不足；同时记录 `Done right`。每条 Lesson 必须有本项目证据、原因和可执行规则；只记录事件、不假定因果。一次复盘无发现也留下范围与新水位。
+Each day, an agent authorized to read repository history and validation results reviews commits from after reviewed-through through the latest HEAD. Prioritize three categories: repeated rework, changes that should not have been merged/released, and insufficient validation; also record `Done right`. Every Lesson must be grounded in project evidence and include an executable rule. State a cause only when the evidence supports it. Otherwise, record the observed event and the specific open questions that must be answered to determine the cause; do not infer causation from timing or correlation alone. Even when a review finds nothing, leave its scope and the new watermark.
 
-按 `LESSONS.md` 记录不同日期。默认同一教训在至少三个独立复盘日期出现后才提升为 code-standards 的项目专属稳定规则。严重的一次性风险可提出临时规则，但要注明待 owner 确认。晋升后保留来源日期和证据，不删除历史脉络。
+Record distinct dates according to `LESSONS.md`. By default, promote the same lesson to a stable project-specific code-standards rule only after it appears on at least three independent review dates. A serious one-time risk may be proposed as a temporary rule, but mark it as pending owner confirmation. After promotion, retain source dates and evidence; do not delete the historical trail.
 
-## 5. 定期校准
+## 5. Periodic calibration
 
-维护者或 agent 定期检查：Lessons 是否已晋升或失效、标准是否已被实现/CI 覆盖、子系统事实是否与代码漂移、链接和命令是否仍然有效、reviewed-through 是否不漏提交。过期的规则应明确修订或归档；不要让文档为了显得完整而无限增长。
+Maintainers or agents periodically check whether Lessons have been promoted or invalidated, standards are covered by implementation/CI, subsystem facts have drifted from the code, links and commands remain valid, and `reviewed-through` does not omit commits. Explicitly revise or archive outdated rules; do not let documentation grow without limit merely to appear complete.
 
-## 6. 自动化接入
+## 6. Automation integration
 
-模板提供可复用提示与 [`automation/runner-contract.md`](automation/runner-contract.md)，但不绑定某家模型、定时服务或 token，也不暗示定时 agent 已配置。项目所有者选定实际 scheduler 后，设置时区、只读/写入范围、运行分支、报告目的地与需要维护者介入的事项。至少先以只读模式试跑一次，确认 commit 范围、水位更新和隐私控制正确，再开放写文档/开 PR 等权限。
+The template provides reusable prompts and [`automation/runner-contract.md`](automation/runner-contract.md), but does not bind any particular model, scheduled service, or token, nor imply that a scheduled agent is configured. After selecting the actual scheduler, the project owner sets the time zone, read-only/write scope, run branch, report destination, and matters requiring maintainer involvement. First run it at least once in read-only mode to confirm that commit scope, watermark updates, and privacy controls are correct; only then open permissions for writing documentation, opening PRs, and similar actions.

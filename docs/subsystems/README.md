@@ -1,26 +1,26 @@
-# 子系统索引
+# Subsystem Index
 
-> Bootstrap 必须依据目标仓库的实际运行时职责生成此索引。以下示例结构不代表项目已有这些模块；未知或待确认边界请标记，不得凭文件夹名称推断责任。
+> Bootstrap must generate this index from the target repository's actual runtime responsibilities. The example structure below does not mean the project has these modules; mark unknown or pending boundaries instead of inferring responsibilities from folder names.
 
-子系统页回答“当前系统如何工作、行为由谁负责、哪里能验证”，不是 roadmap，也不是实现计划。用稳定的职责边界分文档：一个子系统可能跨多个目录，目录也可能包含多个子系统。只有存在独立责任、数据/状态契约或容易误改的边界时才单独建页，避免每个文件一个文档。
+A subsystem page answers “how does the current system work, who is responsible for the behavior, and where can it be verified?” It is not a roadmap or implementation plan. Split documentation by stable responsibility boundaries: one subsystem may span multiple directories, and one directory may contain multiple subsystems. Create a separate page only when there is an independent responsibility, data/state contract, or boundary that is easy to modify incorrectly; avoid one document per file.
 
-## 子系统列表（初始化后填充）
+## Subsystem List (Fill After Initialization)
 
-| 子系统 | 当前职责 / 边界 | 权威文档 |
+| Subsystem | Current responsibility / boundary | Authoritative documentation |
 | --- | --- | --- |
-| `BOOTSTRAP REQUIRED` | 填写当前职责与不负责的内容 | [`TEMPLATE.md`](TEMPLATE.md) 复制后改为真实子系统页 |
+| `BOOTSTRAP REQUIRED` | Fill in current responsibilities and what it does not cover | Copy [`TEMPLATE.md`](TEMPLATE.md) and change it into a real subsystem page |
 
-## 修改协议
+## Modification Protocol
 
-改子系统前先读对应页面及其链接到的 code standards、API/配置契约和测试。改动导致入口、调用路径、存储、状态转换、依赖边界、错误/回退、权限、安全默认值或兼容性改变时，在同一变更更新对应页面与本索引。文档描述已验证的当前行为；未来设想单独标注提案，不与事实混写。
+Before changing a subsystem, first read its page and the code standards, API/configuration contracts, and tests linked from it. If a change alters an entry point, call path, storage, state transition, dependency boundary, error/fallback behavior, permissions, security defaults, or compatibility, update the corresponding page and this index in the same change. Documentation describes verified current behavior; mark future ideas as proposals separately instead of mixing them with facts.
 
-描述语义变更时，说明触发条件或输入，并对照写出变更前后的可观察行为。分别标明接口、状态、兼容性和失败行为是否改变（是/否/未知）；与本次变更无关的维度不必展开，未查明的维度保留为 `UNKNOWN`，不要以概括性措辞掩盖行为差异。
+When describing a semantic change, state the trigger or input and set out the observable behavior before and after the change. Separately identify whether interfaces, state, compatibility, and failure behavior changed (yes/no/unknown); dimensions unrelated to this change need not be expanded, while unexamined dimensions remain `UNKNOWN` rather than being obscured by general wording.
 
-每项重要行为应能追溯到源码路径、公开接口/配置或测试。引用应相对链接并尽可能指向稳定文件和符号；若仓库支持行链接且不会频繁漂移，可增加行号。不要复制长篇代码，也不要仅写抽象口号。具体验收命令集中在 `docs/project-profile.md` / `docs/code-standards.md`，页面只保留与该子系统相关的定向验证。
+Every important behavior should be traceable to a source path, public interface/configuration, or test. Use relative links and point to stable files and symbols where possible; if the repository supports line links and they will not drift frequently, line numbers may be added. Do not copy long code listings or write only abstract slogans. Keep concrete acceptance commands in `docs/project-profile.md` / `docs/code-standards.md`; pages retain only targeted verification relevant to that subsystem.
 
-## 如何验证
+## How to Verify
 
-- 每个条目都应有具体的 owner/实现路径与验证证据，避免空泛的“由 backend 处理”。
-- 文档链接必须在仓库内存在；测试命令必须来自现存脚本、工作流或维护者确认。
-- 关键路径检查状态变化、失败分支和兼容性，而不只写成功路径。
-- 若责任边界有争议，保留已查明事实并标记 `UNKNOWN`，请求项目 owner 确认，不自行拆分或合并模块。
+- Every entry should have a concrete owner/implementation path and verification evidence, avoiding vague statements such as “handled by the backend.”
+- Documentation links must exist in the repository; test commands must come from existing scripts, workflows, or maintainer confirmation.
+- For critical paths, check state changes, failure branches, and compatibility rather than documenting only the success path.
+- If a responsibility boundary is disputed, retain established facts, mark it `UNKNOWN`, and ask the project owner to confirm; do not split or merge modules on your own.

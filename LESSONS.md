@@ -1,41 +1,41 @@
 <!-- reviewed-through: UNKNOWN (bootstrap the project before using this watermark) -->
-# 项目经验与复盘（Lessons）
+# Project Lessons and Retrospectives (Lessons)
 
-这是目标项目自己的动态错题本，不是通用示例集。除本文件定义的维护协议外，以下条目必须来自本项目已检查的提交、issue/PR、CI 输出、复现记录或可核验的维护者反馈；不得从模板或其他项目复制具体技术规则。
+This is the target project's living incident and learning log, not a collection of generic examples. Except for the maintenance protocol defined in this file, every entry must come from commits, issues/PRs, CI output, reproduction records, or verifiable maintainer feedback inspected for this project; do not copy specific technical rules from templates or other projects.
 
-## 维护协议
+## Maintenance protocol
 
-- 每日复盘范围：从上次 `reviewed-through` 提交之后，到复盘时已取得的当前 HEAD；记录准确的 commit SHA、日期、时区和范围。审阅过的提交才可推进水位。
-- 重点查三类：**修完又返工**、**不应合入/发布却合入**、**验证不足或验证基线不可信**。也记录 `Done right`，保留有效实践。
-- 规则用短句写成下次可执行的约束；附事故原因、影响、修复/后续动作和证据链接。证据不足时写作待查问题，不写成确定因果。
-- `Seen` 按出现该教训的**不同复盘日期**计数。同一天多个 commit/多个重复事件只计一天；不得通过重复编辑或拆分复盘虚增次数。
-- 默认在 **至少 3 个不同日期**的复盘中独立出现后，才把通用化的稳定规则提升到 [`docs/code-standards.md`](docs/code-standards.md) 的项目专属部分。提升时把规则、适用范围和证据迁过去，并在此注明已晋升；不要丢失来源。
-- 单次但严重的安全、数据丢失或发布事故可立即提出临时防护；明确标注 `临时规则 / 待维护者确认`，不伪装成三日晋升，也不扩大为未经批准的产品政策。
-- 更新规则后检查 AGENTS 路由、相关子系统页、测试和其他入口是否冲突；保持一个权威定义，不复制粘贴多份。
-- 即使当天没有发现，也写明复盘范围、检查过的来源与“无新教训”；完成后推进 reviewed-through。
+- Daily review scope: from the commit after the previous `reviewed-through` through the current HEAD obtained at review time; record the exact commit SHA, date, time zone, and scope. Only reviewed commits may advance the watermark.
+- Focus on three categories: **fixed and then reworked**, **merged/released when they should not have been**, and **insufficient validation or an untrusted validation baseline**. Also record `Done right` to preserve effective practices.
+- Write rules as short, executable constraints for next time; include the incident cause, impact, fix/follow-up action, and evidence links. When evidence is insufficient, phrase it as an open question, not as a confirmed causal claim.
+- Count `Seen` by **distinct review dates** on which the lesson appeared. Multiple commits or repeated events on the same day count as one day; do not inflate the count through repeated edits or by splitting a review.
+- By default, only after a generalized stable rule has appeared independently in reviews on **at least 3 different dates** may it be promoted to the project-specific section of [`docs/code-standards.md`](docs/code-standards.md). During promotion, move the rule, scope, and evidence, and note the promotion here; do not lose the source.
+- For a serious one-time security, data-loss, or release incident, an agent may immediately propose a temporary safeguard. Mark the proposal `Temporary rule / pending maintainer confirmation`; this does not count as a three-day promotion or authorize an unapproved product policy.
+- After updating a rule, check AGENTS routing, relevant subsystem pages, tests, and other entry points for conflicts; keep one authoritative definition and do not duplicate it by copy-paste.
+- Even when nothing is found that day, state the review scope, sources checked, and “no new lessons”; then advance reviewed-through.
 
-记录具体事件时，可在证据支持的前提下检查：能否按报告人使用的表面、场景和输入复现；测试夹具是否保留真实请求或磁盘数据的形态；测试启动的进程、异步任务和临时资源是否在成功与失败路径都清理；以及已有基线失败是否被调查并记录结论。以上是复盘线索，不是预设本项目已有问题或必须采用某种处置策略；尤其不要把一个项目对红测的处理政策直接推广为所有项目的规则。
+When recording a specific event, evidence may support checking whether it can be reproduced using the reporter's surface, scenario, and inputs; whether test fixtures preserve the shape of the real request or disk data; whether processes, asynchronous tasks, and temporary resources started by tests are cleaned up on both success and failure paths; and whether existing baseline failures were investigated and the conclusion recorded. These are review leads, not assumptions that this project already has these problems or must adopt a particular response; in particular, do not generalize one project's policy for handling red tests into a rule for all projects.
 
-## 活跃教训
+## Active lessons
 
-> Bootstrap 完成前保持为空。初始复盘后以新条目替换此提示。
+> Keep this empty until Bootstrap is complete. After the initial review, replace this prompt with new entries.
 
 <!-- ACTIVE_LESSONS -->
 
-## 已晋升记录
+## Promotion history
 
-> 记录晋升日期、标准章节和所依据的不同复盘日期，保持可追溯。
+> Record the promotion date, standards section, and the distinct review dates on which it was based, preserving traceability.
 
 <!-- PROMOTED_LESSONS -->
 
-## 条目格式
+## Entry format
 
 ```markdown
-### <一句可执行的规则>
-- **为什么：** <复盘确认的原因与后果；不确定的部分明确标注>
-- **证据：** <commit SHA / issue / PR / CI run / 复现记录链接>
-- **修复或后续：** <修复 commit，或尚未解决的 owner>
-- **Done right：** <如有，记一个反例或有效做法>
-- **Seen N×：** <YYYY-MM-DD, YYYY-MM-DD, ...>（日期必须互不相同）
-- **状态：** active | promoted（promoted 时链接 code-standards 规则）
+### <one executable rule>
+- **Why:** <cause and consequence confirmed by the review; clearly mark uncertain parts>
+- **Evidence:** <commit SHA / issue / PR / CI run / reproduction record link>
+- **Fix or follow-up:** <fix commit, or owner if unresolved>
+- **Done right:** <if any, record a counterexample or effective practice>
+- **Seen N×:** <YYYY-MM-DD, YYYY-MM-DD, ...> (dates must be distinct)
+- **Status:** active | promoted (link to the code-standards rule when promoted)
 ```

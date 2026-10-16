@@ -1,91 +1,91 @@
-# 安装与首次 Bootstrap
+# Installation and Initial Bootstrap
 
-本模板仓库名为 **self-evolution-flywheel**。安装器把维护机制文件复制到目标仓库，并为 Codex CLI 与 Claude Code 注册项目级 `SessionStart` 钩子。
+This template repository is named **self-evolution-flywheel**. The installer copies maintenance-mechanism files into the target repository and registers project-level `SessionStart` hooks for Codex CLI and Claude Code.
 
-## 用法
+## Usage
 
-GitHub **Use this template** 创建的副本已包含文档、提示词和项目级钩子配置。对已有仓库安装，或希望幂等检查/补齐配置时，在目标仓库根目录运行：
+A copy created with GitHub **Use this template** already contains the documentation, prompts, and project-level hook configuration. To install into an existing repository, or to perform an idempotent configuration check/repair, run this from the target repository root:
 
 ```bash
 ./install.sh
 ```
 
-### 在目标项目中直接运行一行命令
+### Run a one-line command directly in the target project
 
-如果目标项目没有模板副本，也不想另外克隆模板仓库，可在**目标 Git 仓库根目录**运行：
+If the target project does not contain a template copy and you do not want to clone the template repository separately, run this in the **root of the target Git repository**:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/jack4leo/self-evolution-flywheel/main/install.sh | bash
 ```
 
-管道模式会在临时目录对 `main` 做 Git 浅克隆；管道脚本只负责克隆和委派，实际安装器与模板文件来自同一 checkout，不再另行下载并执行一个可能不同步的源码归档。Git 会校验对象哈希，但不会验证提交者签名。模板文件会安装到当前目录，默认注册 Codex 与 Claude Code 启动钩子。需要 Bash、Git、Python 3 和 curl。此命令应在支持管道安装的改动合并到 `main` 后使用。`curl | bash` 会立即执行远程脚本，首次使用前请先检查 [install.sh](../install.sh)；Codex/Claude Code 仍可能要求用户信任项目设置。管道模式按克隆时的 `main` 获取最新提交；如需固定版本或验证提交签名，请检出并审阅所需提交后运行该检出中的本地 `./install.sh`，不要只固定 raw 脚本 URL。
+Pipeline mode shallow-clones `main` into a temporary directory; the piped script only performs the clone and delegates, so the installer and template files come from the same checkout instead of a separately downloaded source archive that could be out of sync. Git verifies object hashes, but not commit signatures. The template files are installed into the current directory, and Codex and Claude Code startup hooks are registered by default. Bash, Git, Python 3, and curl are required. Use this command only after pipeline-install support has been merged into `main`. `curl | bash` immediately executes a remote script; inspect [install.sh](../install.sh) before first use. Codex/Claude Code may still require the user to trust the project settings. Pipeline mode obtains the latest `main` commit available at clone time; to pin a version or verify a commit signature, check out and review the desired commit and run that checkout's local `./install.sh`, rather than pinning only the raw script URL.
 
-若希望安装后立即启动 Codex Bootstrap（而不是只安装文件和钩子），运行：
+To start Codex Bootstrap immediately after installation (rather than only installing files and hooks), run:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/jack4leo/self-evolution-flywheel/main/install.sh | bash -s -- --bootstrap codex
 ```
 
-不带 `--bootstrap` 时不会自动启动 agent 或修改项目源码；初始化会由后续启动钩子提示，或按下文使用本地安装器显式启动。目标目录须已存在，且启用钩子时必须是 Git 仓库根目录。
+Without `--bootstrap`, no agent is started and no project source is modified automatically; initialization is prompted by a subsequent startup hook, or can be started explicitly with the local installer as described below. The target directory must already exist, and when hooks are enabled it must be the root of a Git repository.
 
-如果模板仓库单独克隆在另一个目录：
+If the template repository is cloned separately into another directory:
 
 ```bash
 /path/to/self-evolution-flywheel/install.sh --target /path/to/your-project
 ```
 
-需要现在立即启动初始化，而不是等到目标项目下一次打开 Codex/Claude Code 后的首个模型回合：
+To start initialization now instead of waiting for the first model turn after the next time the target project opens in Codex/Claude Code:
 
 ```bash
 ./install.sh --bootstrap codex
-# 或
+# or
 ./install.sh --bootstrap claude
 ```
 
-`--bootstrap codex` 使用 `codex exec --sandbox workspace-write -` 读取并执行 `prompts/bootstrap-project.md`；`--bootstrap claude` 以该文件作为 Claude Code 交互会话的首条提示词。CLI 必须已安装、登录并可从 `PATH` 调用。Codex 的写入范围由 `workspace-write` 沙箱限制在工作区，其他权限仍遵循 CLI 自身配置。
+`--bootstrap codex` uses `codex exec --sandbox workspace-write -` to read and execute `prompts/bootstrap-project.md`; `--bootstrap claude` uses that file as the first prompt in a Claude Code interactive session. The CLI must be installed, logged in, and callable from `PATH`. Codex's write scope is restricted to the workspace by the `workspace-write` sandbox; other permissions continue to follow the CLI's own configuration.
 
-安装脚本需要 Bash、Git 和 Python 3（用于安全合并 JSON 设置）；GitHub Template 项目本身已带文件与 hook 配置。Windows 用户请在 WSL 或提供 Bash/Git/Python 的类 Unix 环境运行脚本。
+The installation script requires Bash, Git, and Python 3 (for safely merging JSON settings); a GitHub Template project already includes the files and hook configuration. Windows users should run the script in WSL or a Unix-like environment that provides Bash/Git/Python.
 
-可用 `--target DIR` 指定目标目录，或用 `--no-hooks` 只复制文件、不更改 agent 设置。目标目录必须已存在；默认启用钩子时，目标必须是 Git 仓库根目录。非 Git 目录会被拒绝；若只想安装文件，请显式使用 `--no-hooks`。
+Use `--target DIR` to specify the target directory, or `--no-hooks` to copy files only without changing agent settings. The target directory must already exist; when hooks are enabled by default, the target must be the root of a Git repository. Non-Git directories are rejected; to install files only, explicitly use `--no-hooks`.
 
-## 安装内容与覆盖规则
+## Installation Contents and Overwrite Rules
 
-安装器复制根目录的 `AGENTS.md`、`CLAUDE.md`、`LESSONS.md`、安装器本身、`.agent-maintenance/session-start.sh`、`.agent-maintenance/installer-transaction.py`、`.github/PULL_REQUEST_TEMPLATE.md`，以及 `docs/`（不含仅描述模板来源的 `docs/source-and-extraction.md`）和 `prompts/` 下的文件。不会用模板版 `README.md` 替换目标项目自己的 README。
+The installer copies the root-level `AGENTS.md`, `CLAUDE.md`, `LESSONS.md`, the installer itself, `.agent-maintenance/session-start.sh`, `.agent-maintenance/installer-transaction.py`, `.github/PULL_REQUEST_TEMPLATE.md`, and the files under `docs/` (excluding `docs/source-and-extraction.md`, which only describes the template's sources) and `prompts/`. It does not replace the target project's own `README.md` with the template version.
 
-已存在且内容不同的目标文件默认保留，并在输出中列为冲突；脚本不会静默覆盖。`AGENTS.md` 会先显示精简路由区的 unified diff，并通过控制终端询问维护者；但即使输入 `y`，安装器也不会自动替换已有文件：POSIX/Linux/macOS 没有可移植的、可对非协作写者实现“仅当目标仍是刚检查版本才替换”的原子 compare-and-replace。安装器因此保留原文件，以退出码 `4` 报告未完成，要求人工合并所审阅的区块。没有控制终端时则不询问、不写入，同样保留原文件并报告未完成；其他无冲突模板可能已经安装。缺失的 `AGENTS.md` 可通过不覆盖式新建安全安装；与模板字节相同的文件保持不变。
+Existing target files whose content differs are preserved by default and listed as conflicts in the output; the installer does not silently overwrite them. `AGENTS.md` is handled specially: the installer displays a unified diff with the compact routing block inserted and asks for confirmation through the controlling terminal, but it does not automatically replace an existing file even if the user enters `y`. POSIX/Linux/macOS do not provide a portable atomic compare-and-replace that is safe against non-cooperative writers. The installer therefore preserves the original file and exits with code `4`, requiring a maintainer to merge the reviewed block manually. Without a controlling terminal, it does not prompt or write and likewise preserves the file and reports incomplete installation; other conflict-free templates may already have been installed. A missing `AGENTS.md` can be safely created without overwriting an existing path; a file whose bytes already match the template is left unchanged.
 
-插入区由 `<!-- BEGIN SELF-EVOLUTION-FLYWHEEL MANAGED ROUTING -->` 与 `<!-- END SELF-EVOLUTION-FLYWHEEL MANAGED ROUTING -->` 标记。由于上述并发限制，已有区块的插入/更新都必须人工合并；区外说明、属主、权限、时间戳、扩展属性、ACL 和硬链接关系因此保持原样。差异中的终端控制字符会以可见转义形式显示。符号链接、非普通文件或标记异常的文件不会被自动修改。
+The inserted block is delimited by `<!-- BEGIN SELF-EVOLUTION-FLYWHEEL MANAGED ROUTING -->` and `<!-- END SELF-EVOLUTION-FLYWHEEL MANAGED ROUTING -->`. Because of the concurrency limitation above, inserting or updating an existing block always requires a manual merge; notes outside the block, ownership, permissions, timestamps, extended attributes, ACLs, and hard-link relationships therefore remain unchanged. Terminal control characters in the diff are displayed using visible escape forms. Symlinks, non-regular files, or files with anomalous markers are not modified automatically.
 
-若启用钩子时 `.agent-maintenance/session-start.sh` 已存在且内容不同，安装器会在复制或修改设置前报错退出，不注册任何启动钩子；解决冲突后可重试，或使用 `--no-hooks` 仅安装其他文件。预检会检查目标父目录、Codex/Claude 设置结构和可预见的写权限问题；设置文件自身若是符号链接、硬链接、非普通文件或 JSON 无效/结构冲突，安装会在复制模板文件前报错。若现有 `.codex/hooks.json` 或 `.claude/settings.json` 已包含对应钩子，安装器识别后不改动文件；若需要向已有 JSON 追加钩子，预检会在任何模板复制前拒绝，并保留文件及其元数据，要求人工合并。只有设置文件原先不存在时，安装器才会以不覆盖式创建注册钩子。重复运行会识别已有钩子，不重复添加。
+If `.agent-maintenance/session-start.sh` already exists and differs while hooks are enabled, the installer exits with an error before copying files or modifying settings and registers no startup hooks; resolve the conflict and retry, or use `--no-hooks` to install other files only. Preflight checks target parent directories, Codex/Claude settings structure, and predictable write-permission failures. A settings file that is itself a symlink, hard link, or non-regular file, or contains invalid or structurally conflicting JSON, is rejected before template files are copied. If an existing `.codex/hooks.json` or `.claude/settings.json` already contains the corresponding hook, the installer recognizes it and leaves the file unchanged. If a hook must be appended to existing JSON, preflight rejects the operation before any template files are copied, preserves the settings file and its metadata, and requires a manual merge. The installer creates a hook settings file with no-overwrite semantics only when that file did not previously exist. Repeated runs recognize existing hooks and do not add duplicates.
 
-安装写入按事务日志记录。模板文件和新建设置在发布前使用目标目录句柄；写入前后会从项目根路径重新解析父目录，并拒绝 symlink。目录句柄固定的是目录 inode，不保证该目录仍位于项目树中；非协作进程可以在最后一次路径复核与发布系统调用之间 rename 目录。若发布后复核发现迁移，安装器会报错并尝试回滚；如果目标父目录已移出项目树或无法安全访问，它会保留该目录中的文件、报告回滚不完整并保留日志，而不是声称 dirfd 阻止了越界。该窄竞态无法在这里跨 POSIX/Linux/macOS 原子封锁，外部目录移动造成的文件位置需人工检查。
+Installation writes are recorded in a transaction journal. Before publishing template files and newly created settings, the helper uses target-directory file descriptors; before and after writes, it re-resolves parent paths from the project root and rejects symlinks. A directory descriptor pins the directory inode but does not guarantee that the directory remains inside the project tree. A non-cooperative process can rename the directory between the final path check and the publish syscall. If the post-publication check detects that move, the installer reports an error and attempts rollback. If the target parent has moved outside the project tree or cannot be accessed safely, it preserves the files in that directory, reports incomplete rollback, and retains the journal rather than claiming that a directory descriptor prevents the race. This narrow race cannot be atomically blocked across POSIX/Linux/macOS; files moved externally may require manual inspection.
 
-回滚会先按 inode/内容身份检查本次新建文件，再用不覆盖式 rename 隔离；隔离后的 inode 可能仍被其他进程持有可写 FD，POSIX 无法据此判断该 FD 是否会在稍后写入。因此安装器不 unlink 隔离文件，而保留 `.name.rollback-*` 恢复项，并将回滚标记为不完整；事务日志目录也会保留并打印路径。并发替换/写入、目标目录迁移、隔离 rename 不可用或回滚本身失败都会显式报告，未知数据优先保留而不自动清理。若并发进程已删除新建文件，回滚不会重建该文件。安装失败后，检查错误输出中的日志路径和目标目录内恢复项，确认没有进程仍持有相关文件后再由维护者手工处理；不要盲目重跑。
+Rollback first checks the inode/content identity of files created by this transaction, then isolates them with a no-overwrite rename. Another process may still hold a writable file descriptor to the isolated inode, and POSIX provides no way to determine whether that descriptor will write later. Therefore, the installer does not unlink the isolated file: it preserves a `.name.rollback-*` recovery entry, marks rollback incomplete, and retains and reports the transaction-journal path. Concurrent replacement or writes, moved target directories, unavailable quarantine rename, and rollback failures are reported explicitly; uncertain data is preserved rather than automatically cleaned up. If a concurrent process has already deleted a newly created file, rollback does not recreate it. After an installation failure, inspect the reported journal path and recovery entries in the target directory; only handle them manually after confirming that no process still holds the relevant files, and do not blindly retry.
 
-这不是多文件崩溃一致性事务：强制杀进程或断电仍可能留下部分安装。事务日志初始化失败会在目标文件写入前终止；中途日志更新失败会触发回滚，并在无法完整恢复时保留恢复项与日志、明确报告不完整。若只是在准备已有 `AGENTS.md` 的基线快照时失败，该文件会保持原样、输出冲突，其他独立模板仍可能安装；应根据冲突输出检查后续是否需人工合并。即使使用目录句柄和身份检查，也不能对非协作写者或并发目录 rename 作绝对防护。
+This is not a crash-consistent multi-file transaction: forcibly killing the process or losing power may leave a partial installation. Failure to initialize the journal stops the installer before target files are written. A mid-transaction journal update failure triggers rollback; if recovery is incomplete, the installer preserves recovery entries and the journal and reports that status. If only the baseline snapshot of an existing `AGENTS.md` fails, that file remains unchanged and is reported as a conflict, while other independent templates may still be installed; inspect the conflict output to determine whether a manual merge is needed. Directory descriptors and identity checks do not provide absolute protection against non-cooperative writers or concurrent directory renames.
 
-## 启动钩子会做什么
+## What the Startup Hooks Do
 
-- Codex 项目钩子写入 `.codex/hooks.json`；Claude Code 项目钩子写入 `.claude/settings.json`。
-- 每次 session start/resume/clear/compact/fork 时，钩子只检查 `.agent-maintenance/bootstrap-complete`。标记不存在时，它向 agent 上下文提供一条指令，要求先读取并执行 `prompts/bootstrap-project.md`；标记存在时保持安静。
-- 钩子脚本不启动子 agent、不执行 bootstrap 提示词、不检查源码、不写项目文档，也不联网。启动钩子可以注入上下文，但不会单独触发模型回合；交互式会话通常需要用户先发出第一条消息。因此希望现在就运行完整初始化时，请显式使用 `--bootstrap codex|claude`。
-- Codex 可能要求在 `/hooks` 中审查并信任项目钩子；Claude Code 可能要求用户信任项目设置。信任/确认由各 CLI 管理，安装器不会尝试绕过。
+- The Codex project hook is written to `.codex/hooks.json`; the Claude Code project hook is written to `.claude/settings.json`.
+- On every session start/resume/clear/compact/fork, the hook first checks whether `.agent-maintenance/bootstrap-complete` is non-empty; if so, it exits quietly. Otherwise, it requires `prompts/bootstrap-project.md` to exist. If the prompt file is missing, the script prints an error to stderr and exits with status 0 without injecting the bootstrap instruction. The host CLI may or may not display stderr from a hook that exits successfully, so do not rely on this diagnostic being shown. If the prompt file exists, the hook injects an instruction for the agent to read and execute it first.
+- The hook script does not start a sub-agent, execute the bootstrap prompt, inspect source code, write project documentation, or access the network. A startup hook can inject context but does not trigger a model turn by itself; interactive sessions usually require the user to send the first message. Therefore, to run the complete initialization now, explicitly use `--bootstrap codex|claude`.
+- Codex may require reviewing and trusting project hooks in `/hooks`; Claude Code may require the user to trust the project settings. Trust and confirmation are managed by each CLI, and the installer does not attempt to bypass them.
 
-钩子应当被视为项目代码的一部分：首次启用前检查 `.agent-maintenance/session-start.sh` 与生成的设置。它只读取完成标记并输出固定文本；真正的文件检查和写入由 agent 按 bootstrap 提示词与 CLI 权限执行。
+Treat hooks as part of the project code: inspect `.agent-maintenance/session-start.sh` and the generated settings before enabling them for the first time. The hook checks both the completion marker and whether the bootstrap prompt exists; it does not inspect the prompt's contents. When the prompt exists, it prints fixed text; the agent performs the actual file inspection and writing according to the bootstrap prompt and CLI permissions.
 
-## 完成标记
+## Completion Marker
 
-Bootstrap 提示词要求 agent 只在完成文档核查、验证并报告遗留未知项后写入 `.agent-maintenance/bootstrap-complete`。这个仓库内的标记代表初始化流程已执行完成，不代表所有事实都已知，也不代表维护者已接受待决策项。若初始化受阻或检查未完成，标记应保持缺失，钩子会在后续启动继续提示。
+The bootstrap prompt requires the agent to write `.agent-maintenance/bootstrap-complete` only after completing the documentation review, verification, and report of remaining unknowns. In this repository, the marker means that the initialization process has run; it does not mean that all facts are known or that the maintainer has accepted pending decisions. If initialization is blocked or incomplete, the marker should remain absent so the hook continues prompting at later startups.
 
-## 安装器回归测试
+## Installer Regression Tests
 
-仓库的 `.github/workflows/installer-tests.yml` 会在 push、pull request 和手动触发时运行 `bash tests/test-install.sh`。测试使用隔离临时目录，覆盖只读 Claude 配置预检、模板复制与 provider 写入中途失败、并发外部改写保留、AGENTS/设置拒绝替换、日志初始化与中途更新失败、AGENTS 基线快照失败、回滚二次失败、父目录 symlink 拒绝，以及固定 PR 原 head 与当前实现之间的确定性系统调用边界对照（替换覆盖、目录移出项目树、回滚时持有 FD 写入）。旧 head 在相同注入下应暴露丢失/未检测问题；新实现应保留不确定数据或明确报不完整。运行命令：`bash tests/test-install.sh`。
+The repository's `.github/workflows/installer-tests.yml` runs `bash tests/test-install.sh` on pushes, pull requests, and manual triggers. The suite uses isolated temporary directories and covers read-only Claude settings preflight; failures during template copying and provider writes; preservation of concurrent external changes; refusal to replace `AGENTS.md` or settings files; journal initialization and mid-transaction update failures; `AGENTS.md` baseline-snapshot failure; secondary rollback failures; rejection of symlink parent directories; and deterministic syscall-boundary comparisons between the original PR head and the current implementation (replacement overwrite, moving a directory outside the project tree, and a write through an open file descriptor during rollback). Under the same injected races, the old implementation should expose a lost or undetected update; the current implementation should preserve uncertain data or explicitly report incomplete rollback. Run `bash tests/test-install.sh` locally.
 
-## 官方行为说明
+## Official Behavior Documentation
 
-- [Codex 项目级 `AGENTS.md` 指令](https://learn.chatgpt.com/docs/agent-configuration/agents-md)
+- [Codex project-level `AGENTS.md` instructions](https://learn.chatgpt.com/docs/agent-configuration/agents-md)
 - [Codex hooks](https://learn.chatgpt.com/docs/hooks)
-- [Codex `exec` 非交互模式与沙箱](https://learn.chatgpt.com/docs/non-interactive-mode)
+- [Codex `exec` non-interactive mode and sandbox](https://learn.chatgpt.com/docs/non-interactive-mode)
 - [Claude Code hooks](https://code.claude.com/docs/en/hooks)
 - [Claude Code hooks guide](https://code.claude.com/docs/en/hooks-guide)
 - [Claude Code CLI reference](https://code.claude.com/docs/en/cli-reference)

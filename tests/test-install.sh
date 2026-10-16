@@ -172,8 +172,10 @@ if PYTHONPATH="$journal_update_modules" JOURNAL_REPLACE_COUNTER="$counter_file" 
 fi
 grep -Fq 'injected transaction journal update failure' "$TMP_DIR/journal-update.log" \
   || fail "mid-transaction journal failure was not visible"
-[[ ! -e "$journal_update_target/.agent-maintenance" ]] \
-  || fail "journal update failure left an unrecorded empty directory behind"
+[[ -d "$journal_update_target/.agent-maintenance" ]] \
+  || fail "journal update rollback did not conservatively preserve its created directory"
+grep -Fq 'PRESERVED directory created before transaction journal failure' "$TMP_DIR/journal-update.log" \
+  || fail "directory preserved after journal failure was not reported"
 [[ ! -e "$journal_update_target/AGENTS.md" && ! -e "$journal_update_target/CLAUDE.md" \
     && ! -e "$journal_update_target/LESSONS.md" ]] \
   || fail "journal update failure left earlier template files at their active paths"
@@ -940,5 +942,6 @@ grep -Fq 'Cloning Self-Evolution Flywheel source' "$TMP_DIR/remote.log" \
 
 python3 "$REPO_ROOT/tests/test-installer-races.py"
 python3 "$REPO_ROOT/tests/test-installer-recovery.py"
+python3 "$REPO_ROOT/tests/test-installer-security.py"
 
 echo "PASS: installer safety, hook and session-start regression tests"

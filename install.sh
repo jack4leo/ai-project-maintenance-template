@@ -25,10 +25,11 @@ usage() {
 Usage: ./install.sh [--target DIR] [--no-hooks] [--bootstrap codex|claude]
 
 Install Self-Evolution Flywheel project guidance into an existing repository.
-Existing files are never overwritten. A different AGENTS.md may receive a
-reviewed, marker-delimited routing block; other conflicts are preserved.
-Existing Codex/Claude JSON settings are merged additively; invalid settings are
-left untouched and cause an error.
+Existing files are never overwritten. A different AGENTS.md is shown as a
+proposed diff but must be merged manually. Existing provider JSON is never
+rewritten: exact hooks are accepted, missing settings files are created, and
+adding a hook to a pre-existing JSON file requires a manual merge.
+Invalid settings are left untouched and cause an error.
 
 Options:
   --target DIR              Destination project root (default: current directory)
@@ -185,6 +186,34 @@ import subprocess
 import sys
 
 provider, filename, target_dir, helper = sys.argv[1:]
+
+def open_checked_settings(path, expected):
+    nofollow = getattr(os, "O_NOFOLLOW", None)
+    if nofollow is None:
+        raise OSError("platform cannot safely open settings without following symbolic links")
+
+    def opener(name, flags):
+        return os.open(
+            name,
+            flags | nofollow | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_CLOEXEC", 0),
+        )
+
+    handle = open(path, encoding="utf-8", opener=opener)
+    try:
+        opened = os.fstat(handle.fileno())
+        if not stat.S_ISREG(opened.st_mode):
+            raise OSError("settings path is not a regular file")
+        if (opened.st_dev, opened.st_ino, opened.st_nlink) != (
+            expected.st_dev,
+            expected.st_ino,
+            expected.st_nlink,
+        ):
+            raise OSError("settings file changed between inspection and open")
+        return handle, opened
+    except Exception:
+        handle.close()
+        raise
+
 try:
     if os.path.lexists(filename):
         info = os.lstat(filename)
@@ -209,13 +238,19 @@ try:
                     "multiply-linked settings lack one verified provider staging candidate"
                     + (f": {detail}" if detail else "")
                 )
-        for name in os.listxattr(filename, follow_symlinks=False):
-            os.getxattr(filename, name, follow_symlinks=False)
-        with open(filename, encoding="utf-8") as handle:
+        handle, opened = open_checked_settings(filename, info)
+        try:
+            for name in os.listxattr(handle.fileno()):
+                os.getxattr(handle.fileno(), name)
             try:
                 config = json.load(handle)
             finally:
-                os.utime(handle.fileno(), ns=(info.st_atime_ns, info.st_mtime_ns))
+                os.utime(
+                    handle.fileno(),
+                    ns=(opened.st_atime_ns, opened.st_mtime_ns),
+                )
+        finally:
+            handle.close()
     else:
         config = {}
 except Exception as exc:
@@ -292,6 +327,33 @@ import sys
 source_dir, target_dir, hooks_enabled, *relative_files = sys.argv[1:]
 needed_directories = set()
 
+def open_checked_settings(path, expected):
+    nofollow = getattr(os, "O_NOFOLLOW", None)
+    if nofollow is None:
+        raise OSError("platform cannot safely open settings without following symbolic links")
+
+    def opener(name, flags):
+        return os.open(
+            name,
+            flags | nofollow | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_CLOEXEC", 0),
+        )
+
+    handle = open(path, encoding="utf-8", opener=opener)
+    try:
+        opened = os.fstat(handle.fileno())
+        if not stat.S_ISREG(opened.st_mode):
+            raise OSError("settings path is not a regular file")
+        if (opened.st_dev, opened.st_ino, opened.st_nlink) != (
+            expected.st_dev,
+            expected.st_ino,
+            expected.st_nlink,
+        ):
+            raise OSError("settings file changed between inspection and open")
+        return handle, opened
+    except Exception:
+        handle.close()
+        raise
+
 def needs_managed_agents_write(source, destination):
     try:
         info = os.lstat(destination)
@@ -320,15 +382,29 @@ if hooks_enabled == "1":
         filename = os.path.join(target_dir, relative)
         config = {}
         if os.path.lexists(filename):
-            with open(filename, encoding="utf-8") as handle:
-                original = os.fstat(handle.fileno())
+            try:
+                expected = os.lstat(filename)
+                if stat.S_ISLNK(expected.st_mode):
+                    raise OSError("settings file is a symbolic link")
+                if not stat.S_ISREG(expected.st_mode):
+                    raise OSError("settings path is not a regular file")
+                handle, opened = open_checked_settings(filename, expected)
                 try:
-                    config = json.load(handle)
+                    try:
+                        config = json.load(handle)
+                    finally:
+                        os.utime(
+                            handle.fileno(),
+                            ns=(opened.st_atime_ns, opened.st_mtime_ns),
+                        )
                 finally:
-                    os.utime(
-                        handle.fileno(),
-                        ns=(original.st_atime_ns, original.st_mtime_ns),
-                    )
+                    handle.close()
+            except Exception as exc:
+                print(
+                    f"ERROR: cannot safely inspect {filename}: {exc}; no files were installed.",
+                    file=sys.stderr,
+                )
+                sys.exit(3)
         sessions = config.get("hooks", {}).get("SessionStart", [])
         already_registered = any(
             isinstance(session, dict)

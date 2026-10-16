@@ -15,6 +15,11 @@ if [[ -s "$MARKER" ]]; then
   exit 0
 fi
 
+if [[ -L "$PROJECT_ROOT/prompts" || -L "$BOOTSTRAP_PROMPT" ]]; then
+  printf '%s\n' "Self-Evolution Flywheel: prompts/bootstrap-project.md is a symbolic link; refusing to load an external bootstrap prompt."
+  exit 0
+fi
+
 if [[ ! -f "$BOOTSTRAP_PROMPT" ]]; then
   printf '%s\n' "Self-Evolution Flywheel: prompts/bootstrap-project.md is missing; cannot bootstrap."
   exit 0

@@ -939,5 +939,6 @@ grep -Fq 'Cloning Self-Evolution Flywheel source' "$TMP_DIR/remote.log" \
   || fail "pipe installer did not install the bootstrap prompt"
 
 python3 "$REPO_ROOT/tests/test-installer-races.py"
+python3 "$REPO_ROOT/tests/test-installer-recovery.py"
 
 echo "PASS: installer safety, hook and session-start regression tests"

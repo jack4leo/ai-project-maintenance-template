@@ -3,9 +3,11 @@
 
 import base64
 import ctypes
+import fcntl
 import hashlib
 import json
 import os
+import re
 import secrets
 import stat
 import sys
@@ -246,7 +248,7 @@ def inspect_existing(parent_fd, name, allow_hardlinks=False):
         return None
     try:
         data = read_open_file(fd)
-        return {"data": data}
+        return {"data": data, "nlink": os.fstat(fd).st_nlink}
     finally:
         os.close(fd)
 
@@ -418,6 +420,178 @@ def hook_entry(provider):
     }
 
 
+LOCK_FD_ENV = "SELF_EVOLUTION_FLYWHEEL_LOCK_FD"
+HOOK_SETTINGS = {
+    "codex": ".codex/hooks.json",
+    "claude": ".claude/settings.json",
+}
+
+
+def acquire_target_lock(root):
+    fd = open_root(root)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError as exc:
+        os.close(fd)
+        raise InstallError("another installer is active for this target; retry after it exits") from exc
+    except OSError as exc:
+        os.close(fd)
+        raise InstallError(f"cannot acquire an exclusive target lock: {exc}") from exc
+    return fd
+
+
+def verify_target_lock(root, descriptor):
+    try:
+        fd = int(descriptor)
+        held = os.fstat(fd)
+        if not stat.S_ISDIR(held.st_mode):
+            raise InstallError("installer lock descriptor is not a directory")
+        root_fd = open_root(root)
+        try:
+            actual = os.fstat(root_fd)
+        finally:
+            os.close(root_fd)
+        if (held.st_dev, held.st_ino) != (actual.st_dev, actual.st_ino):
+            raise InstallError("installer lock descriptor does not match the target directory")
+        # Reasserting flock on the inherited open-file description is safe; if
+        # this descriptor was not locked by the launcher, it locks it here.
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except InstallError:
+        raise
+    except (OSError, ValueError) as exc:
+        raise InstallError(f"installer target lock is missing or invalid: {exc}") from exc
+
+
+def lock_and_exec(root, command):
+    if not command:
+        raise InstallError("target lock launcher requires a command")
+    fd = acquire_target_lock(root)
+    os.set_inheritable(fd, True)
+    env = os.environ.copy()
+    env[LOCK_FD_ENV] = str(fd)
+    os.execvpe(command[0], command, env)
+
+
+def expected_new_hook_payload(provider):
+    config = {}
+    sessions = validate_config(config, HOOK_SETTINGS[provider])
+    sessions.append(hook_entry(provider))
+    return (json.dumps(config, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
+
+
+def recover_provider_staging(root, provider, report=True):
+    if provider not in HOOK_SETTINGS:
+        raise InstallError(f"unknown provider: {provider}")
+    descriptor = os.environ.get(LOCK_FD_ENV)
+    if descriptor is None:
+        raise InstallError("refusing staging recovery without the exclusive target lock")
+    verify_target_lock(root, descriptor)
+
+    relative = HOOK_SETTINGS[provider]
+    state = {"operations": [], "created_directories": []}
+    root_fd = open_root(root)
+    parent_fd = None
+    try:
+        try:
+            parent_fd, name = open_parent(root_fd, relative, False, state, "")
+        except FileNotFoundError:
+            return False
+        if not verify_parent(root, root_fd, relative, parent_fd):
+            raise InstallError(f"target directory moved or changed during staging recovery: {relative}")
+
+        prefix = f".{name}.flywheel-"
+        matching = [entry for entry in os.listdir(parent_fd) if entry.startswith(prefix)]
+        if not matching:
+            return False
+        pattern = re.compile(rf"\.{re.escape(name)}\.flywheel-[0-9]+-[0-9a-f]{{12}}\Z")
+        unknown = [entry for entry in matching if pattern.fullmatch(entry) is None]
+        if unknown:
+            raise InstallError(
+                f"unrecognized possible provider staging entry for {relative}: {unknown[0]}; left untouched"
+            )
+        if len(matching) != 1:
+            raise InstallError(f"multiple possible provider staging entries for {relative}; left untouched")
+        alias = matching[0]
+
+        try:
+            active_info = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+        except FileNotFoundError as exc:
+            raise InstallError(f"staging entry {alias} has no unique active settings file {relative}; left untouched") from exc
+        alias_info = os.stat(alias, dir_fd=parent_fd, follow_symlinks=False)
+        if not stat.S_ISREG(active_info.st_mode) or not stat.S_ISREG(alias_info.st_mode):
+            raise InstallError(f"possible provider staging entry {alias} is not a regular file; left untouched")
+        if (active_info.st_dev, active_info.st_ino) != (alias_info.st_dev, alias_info.st_ino):
+            raise InstallError(f"possible provider staging entry {alias} is not the active settings inode; left untouched")
+        if active_info.st_nlink != 2 or alias_info.st_nlink != 2:
+            raise InstallError(
+                f"possible provider staging entry {alias} has link count {active_info.st_nlink}, not exactly 2; left untouched"
+            )
+        expected_owner = (os.geteuid(), os.getegid())
+        if (active_info.st_uid, active_info.st_gid) != expected_owner or (
+            alias_info.st_uid,
+            alias_info.st_gid,
+        ) != expected_owner:
+            raise InstallError(f"possible provider staging entry {alias} has an unexpected owner/group; left untouched")
+        expected_mode = 0o644
+        if stat.S_IMODE(active_info.st_mode) != expected_mode or stat.S_IMODE(alias_info.st_mode) != expected_mode:
+            raise InstallError(f"possible provider staging entry {alias} has unexpected permissions; left untouched")
+
+        fd = os.open(
+            name,
+            os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | NOFOLLOW | getattr(os, "O_NONBLOCK", 0),
+            dir_fd=parent_fd,
+        )
+        try:
+            opened = os.fstat(fd)
+            if (opened.st_dev, opened.st_ino, opened.st_nlink) != (
+                active_info.st_dev,
+                active_info.st_ino,
+                2,
+            ):
+                raise InstallError(f"active settings changed while validating staging entry {alias}; left untouched")
+            data = read_open_file(fd)
+            after_read = os.fstat(fd)
+            stable_fields = ("st_dev", "st_ino", "st_size", "st_mtime_ns", "st_mode", "st_uid", "st_gid", "st_nlink")
+            if any(getattr(opened, key) != getattr(after_read, key) for key in stable_fields):
+                raise InstallError(f"active settings changed while validating staging entry {alias}; left untouched")
+        finally:
+            os.close(fd)
+        if data != expected_new_hook_payload(provider):
+            raise InstallError(
+                f"possible provider staging entry {alias} does not match the installer's expected {provider} settings; left untouched"
+            )
+
+        # Recheck the candidate, but never unlink it: a pathname can be replaced
+        # after any lstat/identity check, and unlink would then delete user data.
+        current_active = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+        current_alias = os.stat(alias, dir_fd=parent_fd, follow_symlinks=False)
+        if (
+            not stat.S_ISREG(current_active.st_mode)
+            or not stat.S_ISREG(current_alias.st_mode)
+            or (current_active.st_dev, current_active.st_ino) != (active_info.st_dev, active_info.st_ino)
+            or (current_alias.st_dev, current_alias.st_ino) != (active_info.st_dev, active_info.st_ino)
+            or current_active.st_nlink != 2
+            or current_alias.st_nlink != 2
+            or (current_active.st_uid, current_active.st_gid) != expected_owner
+            or (current_alias.st_uid, current_alias.st_gid) != expected_owner
+            or stat.S_IMODE(current_active.st_mode) != expected_mode
+            or stat.S_IMODE(current_alias.st_mode) != expected_mode
+        ):
+            raise InstallError(f"provider staging entry {alias} changed during validation; left untouched")
+        if not verify_parent(root, root_fd, relative, parent_fd):
+            raise InstallError(f"target directory moved during staging inspection for {relative}; left untouched")
+        if report:
+            print(
+                f"PRESERVED possible installer staging link {alias} for {relative}; "
+                "its origin cannot be proven from its name or metadata, so it was not removed"
+            )
+        return True
+    finally:
+        if parent_fd is not None:
+            os.close(parent_fd)
+        os.close(root_fd)
+
+
 def op_merge_hook(root, provider, relative, state_path):
     state = load_state(state_path)
     root_fd = open_root(root)
@@ -428,7 +602,7 @@ def op_merge_hook(root, provider, relative, state_path):
         parent_fd, name = open_parent(root_fd, relative, True, state, state_path)
         if not verify_parent(root, root_fd, relative, parent_fd):
             raise InstallError(f"target directory moved or changed after it was opened; refusing settings write: {relative}")
-        original = inspect_existing(parent_fd, name)
+        original = inspect_existing(parent_fd, name, allow_hardlinks=True)
         config = {}
         if original is not None:
             try:
@@ -443,6 +617,12 @@ def op_merge_hook(root, provider, relative, state_path):
                 continue
             for handler in existing.get("hooks", []):
                 if isinstance(handler, dict) and handler.get("command") == command:
+                    if original is not None and original["nlink"] > 1:
+                        if original["nlink"] != 2 or not recover_provider_staging(root, provider, report=False):
+                            raise InstallError(
+                                f"cannot safely accept multiply-linked {relative}; "
+                                "no unique verified provider staging candidate was found"
+                            )
                     print("HOOK PRESENT")
                     return
         if original is not None:
@@ -603,7 +783,16 @@ def main(argv):
         fail("missing operation")
     command = argv[0]
     try:
-        if command == "init" and len(argv) == 3:
+        if command == "lock-exec" and len(argv) >= 4:
+            lock_and_exec(argv[1], argv[2:])
+        elif command == "verify-lock" and len(argv) == 3:
+            verify_target_lock(argv[1], argv[2])
+        elif command == "recover-hook-staging" and len(argv) == 3:
+            recover_provider_staging(argv[1], argv[2])
+        elif command == "validate-hook-staging" and len(argv) == 3:
+            if not recover_provider_staging(argv[1], argv[2], report=False):
+                raise InstallError(f"no verified provider staging candidate exists for {HOOK_SETTINGS.get(argv[2], argv[2])}")
+        elif command == "init" and len(argv) == 3:
             root_fd = open_root(argv[1])
             os.close(root_fd)
             save_state(argv[2], {"operations": [], "created_directories": []})

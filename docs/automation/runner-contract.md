@@ -1,35 +1,62 @@
 # Daily-review runner contract
 
-This is an adapter contract for any authorized scheduled agent. It is intentionally provider-neutral: the template does not configure a model, scheduler, API credential, GitHub App, or workflow. The owner must choose and authorize those separately.
+This contract separates **range freezing** from any later review or write stage. The first stage proves and emits one immutable range manifest. It does not review lessons, archive a retrospective, or modify the watermark. Any later writer consumes that already-frozen manifest; it must not derive or silently replace the range from a newer `HEAD` or watermark.
 
-## Required inputs
+The template does not configure a model, scheduler, API credential, GitHub App, or workflow. The owner must choose and authorize those separately.
 
-The runner needs a repository checkout, project timezone, default branch, the last **successfully reviewed** commit SHA from the single reviewed-through marker at the top of `LESSONS.md`, current HEAD, this repository's `AGENTS.md`, `LESSONS.md`, `docs/project-profile.md`, `docs/code-standards.md`, `docs/subsystems/README.md`, and the review prompt. `docs/project-profile.md` configures the archive location and recovery policy; it is not a second watermark store. If PR/CI metadata is used, it must be read-only and scoped to this repository.
+## Stage 1: freeze a read-only range
 
-The run records both boundary SHAs and the time of collection. If the previous SHA is missing, not an ancestor of HEAD, the branch was rewritten, history is shallow, or the intended range cannot be proven complete, do not silently move the watermark: report the gap and ask for recovery instructions. Handle merge commits and amended/rebased history according to a project policy recorded in `project-profile.md`.
+### Inputs and authority
 
-The project profile must state the applicable policy for overlapping runs, failures/retries, timeout or interruption, and recovery from partial writes. Do not assume a scheduler, locking service, retry policy, or storage atomicity that the project has not selected and verified. Keep recovery behavior consistent with the watermark and archive guarantees above.
+The range freezer reads only:
 
-## Idempotency and recovery
+- Git commit/tree/blob history and repository metadata needed to identify `HEAD`, validate ancestry and completeness, and enumerate changed paths;
+- the one `reviewed-through` marker at the top of the working-tree `LESSONS.md`; and
+- the exclusion policy at [`range-exclusions.json`](range-exclusions.json), as committed in the frozen `through` commit.
 
-- Give each verified range a stable key, for example `<repository>/<default branch>/<from SHA>..<through SHA>`, and store it in the review record. Every retry of that range reuses the same key; attempt timestamps are not deduplication keys.
-- Under the default `docs/reviews/YYYY-MM-DD.md` archive, keep a distinct entry per range key. A retry resumes or upserts the same entry; a different range on the same date gets a separate entry (or a separate key-named file). Never replace an earlier completed record just because the date matches.
-- Apply archive and memory-file changes as idempotent upserts associated with the range/evidence. A retry must not duplicate records or lessons, or increment `Seen` again for the same review date. Keep the previous watermark while writing and checking these files.
-- Re-read and verify every required archive and memory update, then advance the reviewed-through watermark to `through` as the final durable write. If any write or verification fails, or the run is interrupted before that final write, preserve the previous watermark.
-- On retry, inspect the existing entry and memory changes for the same key, reconcile what is already complete, and write only missing/corrected content. Do not discard earlier successful records to restart. If partial or corrupt state cannot be reconciled safely, stop and ask the owner; do not assume atomic replacement, backups, or locking unless the selected storage mechanism provides them.
+`LESSONS.md` is the sole watermark authority. `docs/project-profile.md` may configure the archive location, but it is not a second watermark store. The marker must occur exactly once and contain a non-empty, full-length hexadecimal commit object ID for this repository's object format. `UNKNOWN`, a missing/duplicate marker, an abbreviated or malformed ID, an ID that does not resolve to a commit, missing required objects, shallow or otherwise incomplete history, or a watermark that is not an ancestor of `HEAD` is a hard failure. Do not guess, bootstrap, fetch, repair, or advance the watermark. In particular, a rebase/force-push that makes the watermark non-ancestral requires explicit recovery outside this stage. Replacement refs or grafts must not be allowed to redefine ancestry.
 
-## Required behavior
+The lower boundary `from` is the reviewed-through watermark and is **exclusive**. `through` is the full object ID of the `HEAD` observed during freezing and is **inclusive**. The commit list contains every commit reachable from `through` but not from `from`. If `from == through`, the list is empty. The freezer validates that the traversed history and objects needed to classify the range are present; it must fail closed rather than emit a partial range.
 
-1. Run with the repository timezone. Acquire a single-run lock or otherwise prevent overlapping reviews from racing over `LESSONS.md` and the watermark.
-2. Inspect every commit in the verified range and relevant diff/context; read available CI/PR evidence. Do not execute untrusted code merely to review it.
-3. Follow [`../../prompts/daily-review.md`](../../prompts/daily-review.md). Cite the commit/PR/check evidence behind each finding; separate observations from causal hypotheses.
-4. If successful, write the review record and required memory updates idempotently, verify them, then advance the reviewed-through SHA as the final write. If analysis, writes, or evidence retrieval fails, preserve the last successful watermark and retry with the same range key.
-5. Make document-only changes on a dedicated branch or in the project's approved review channel. Report the branch/PR and the exact range. Do not merge, publish, deploy, change account access, or touch production unless the project profile explicitly grants that authority.
+### Commit order and path exclusions
+
+List each included commit once, in a deterministic parent-before-child topological order. If multiple commits are ready at the same point in that order, choose the lexicographically smallest full object ID first. Record each commit's full SHA, tree SHA, and ordered parent SHAs. For path comparison, compare each commit separately with each parent; compare a root commit with the empty tree. Disable rename detection so the same Git tree changes always produce the same path records. A path that cannot be represented as valid UTF-8 is a hard failure, not a lossy or omitted path.
+
+The only path-exclusion authority is the committed JSON policy at `docs/automation/range-exclusions.json` in `through`. The manifest records that source path, its full blob ID and SHA-256 of the exact file bytes, and every configured rule with its rationale. Evaluate rules in file order, but do not stop after the first match: emit one record for each matching rule. If more than one pattern in a path-glob rule matches, record the first matching pattern in that rule's pattern-array order. Path globs are anchored at the repository root: `*` and `?` match within one path segment, while `**` matches zero or more path segments. The binary rule classifies a changed path as binary if either extant side of that parent comparison contains a NUL byte. A gitlink/submodule entry is excluded as a whole because its nested repository contents are not available in this history. For every exclusion, emit a separate record identifying the commit, parent (or `null` for a root), repository-relative path, rule ID, matched pattern or classification, and rationale. Order these records by commit-list order, parent order in the commit object (with the root's `null` parent first), path byte sequence, then policy rule order. Do not silently drop paths or rules. Configured rules remain visible even when they match no paths. The policy file is data, not executable code.
+
+### Frozen manifest and range key
+
+Emit one canonical JSON manifest (stdout is permitted). It contains at least:
+
+- `manifest_version`;
+- `from` and `through` as full object IDs;
+- `commits` in the specified order, with full commit/tree/parent IDs;
+- `exclusion_policy`, including source path, source commit/blob ID, exact-byte SHA-256, and all rule definitions/reasons; and
+- `excluded_paths`, with one explicit record for every path exclusion.
+
+The range key is `sha256:<lowercase hex>` over the canonical UTF-8 JSON serialization of every manifest field except `range_key`. Canonical serialization uses recursively lexicographically sorted object keys, array order as specified above, compact separators `,` and `:`, unescaped UTF-8 for non-ASCII characters, JSON escaping for required characters, integers only (no floats/NaN), and no trailing newline for the hash input. The emitted JSON may end in one newline. No attempt timestamp, machine path, or other volatile local state belongs in the manifest or key. The commit/tree IDs bind the reviewed Git content; the policy bytes and expanded exclusion records bind the rule set and its effect. Identical inputs therefore yield the same key; a changed `through`, commit graph/content, policy bytes, or exclusion result yields a different key.
+
+### Side-effect boundary and retry behavior
+
+This stage is strictly read-only. It must not write `LESSONS.md`, create or update anything under `docs/reviews/`, create archives, or advance any watermark. It must not fetch or repair history. Preserve atime for files read directly where the platform permits (use `O_NOATIME` where available); set Git to avoid optional locks and lazy fetching. A failed validation emits a non-zero result and no successful manifest. Re-running with the same `from`, `through`, history, and committed policy produces the same manifest and key. If `HEAD` advances, that is a new range and key; never overwrite or reinterpret a previously frozen manifest as the newer range.
+
+## Stage 2: future review/write consumer (not implemented by the range freezer)
+
+Any later writer is a separate implementation and permission boundary. It may consume only a previously emitted, canonical manifest whose range key validates; retries, archive upserts, and lesson updates are keyed to that exact manifest. It may not recalculate `from`, `through`, or the commit list, nor replace a frozen manifest with the current branch state. If the manifest is unavailable or invalid, stop and freeze a new range explicitly rather than guessing.
+
+Only this later stage may analyze the commits and, if separately authorized, write review records or lessons. It must verify all required archive and Lessons updates before advancing `reviewed-through` to the manifest's `through` as its **last durable write**. The watermark remains unchanged if archive review or any required write/verification fails. Archive entries and lesson changes are idempotent by range key; retries reconcile the same key rather than creating duplicate entries or deleting earlier records. Any cleanup of partial writes needs its own safe recovery protocol and is not implied by this range contract.
+
+Lesson IDs and CI that counts appearances on at least three distinct review dates are based only on Lessons that have already been written. They do not participate in selecting or proving a range and are outside the range-freezer implementation.
+
+## Later review/write behavior
+
+When that independent stage is implemented, it must also:
+
+1. Use the project's timezone and follow [`../../prompts/daily-review.md`](../../prompts/daily-review.md), with findings grounded in cited commit/PR/check evidence.
+2. Preserve the previous watermark through analysis, archive writes, Lessons writes, and verification; advance it only as the final durable write after archive review succeeds.
+3. Keep a distinct archive entry per range key. Under the default `docs/reviews/YYYY-MM-DD.md` convention, a different range on the same date must not replace an earlier completed record.
+4. Report the manifest key and exact boundaries. Do not merge, publish, deploy, change account access, or touch production unless the project profile explicitly grants that authority.
 
 ## Permissions and privacy
 
-Start read-only. Grant write access only to the project memory files and only after the owner verifies the initial run. Use least-privilege credentials, never print or persist secrets, and do not send source or commit data to unapproved services. Any runner output must redact secret material and avoid copying large diffs or private payloads into logs.
-
-## Successful result fields
-
-A successful run records: review date/timezone; `from` and `through` SHA; number of commits inspected; evidence sources checked; findings grouped as rework / should-not-merge-or-release / validation-gap / done-right; Lessons and standards files changed; unresolved questions; runner status. Each finding and material conclusion must be traceable to the specific reviewed commit(s) and concrete evidence (for example, a source reference, test command/result, or CI run); record evidence locations/identifiers rather than copying large or sensitive payloads. A no-finding day still records the range and `No new evidence-backed lesson`.
+The range freezer needs read-only Git and file access. A later writer must receive separate, least-privilege authorization for its write scope. Never print or persist secrets, execute untrusted code merely to review it, or send source/commit data to an unapproved service. Logs should avoid copying large diffs or private payloads.

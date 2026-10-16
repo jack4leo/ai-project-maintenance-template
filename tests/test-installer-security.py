@@ -20,6 +20,11 @@ INSTALLER = REPO_ROOT / "install.sh"
 HELPER = REPO_ROOT / ".agent-maintenance/installer-transaction.py"
 SESSION_START = REPO_ROOT / ".agent-maintenance/session-start.sh"
 CODEX_COMMAND = 'bash "$(git rev-parse --show-toplevel)/.agent-maintenance/session-start.sh" codex'
+CLAUDE_COMMAND = 'bash "${CLAUDE_PROJECT_DIR}/.agent-maintenance/session-start.sh" claude'
+PROVIDER_SETTINGS = {
+    "codex": (".codex/hooks.json", CODEX_COMMAND),
+    "claude": (".claude/settings.json", CLAUDE_COMMAND),
+}
 
 
 def load_helper():
@@ -45,7 +50,7 @@ class InstallerSecurityRegressionTests(unittest.TestCase):
             (target / ".codex").mkdir()
             settings = target / ".codex/hooks.json"
             payload = json.dumps(
-                {"hooks": {"SessionStart": [{"hooks": [{"command": CODEX_COMMAND}]}]}}
+                {"hooks": {"SessionStart": [{"hooks": [{"type": "command", "command": CODEX_COMMAND}]}]}}
             ) + "\n"
             settings.write_text(payload, encoding="utf-8")
 
@@ -162,12 +167,12 @@ class InstallerSecurityRegressionTests(unittest.TestCase):
                 timeout=15,
             )
             self.assertEqual(result.returncode, 1, result.stderr)
-            self.assertIn("symbolic link", result.stdout)
+            self.assertIn("symbolic link", result.stderr)
+            self.assertEqual(result.stdout, "")
             self.assertNotIn("read and execute prompts/bootstrap-project.md", result.stdout)
             self.assertNotIn("untrusted external instructions", result.stdout)
-            self.assertEqual(result.stderr, "")
 
-    def test_help_and_docs_match_manual_merge_and_stdout_behavior(self) -> None:
+    def test_help_and_docs_match_manual_merge_and_error_stream_behavior(self) -> None:
         help_result = subprocess.run(
             ["bash", str(INSTALLER), "--help"],
             stdout=subprocess.PIPE,
@@ -179,12 +184,12 @@ class InstallerSecurityRegressionTests(unittest.TestCase):
         docs = (REPO_ROOT / "docs/installation.md").read_text(encoding="utf-8")
         help_text = " ".join(help_result.stdout.split())
         self.assertIn("must be merged manually", help_text)
-        self.assertIn("if an existing settings file needs a hook added, hook registration is skipped", help_text)
+        self.assertIn("only that provider's hook registration is skipped", help_text)
         self.assertIn("never automatically replaced", readme)
         self.assertIn("merge the reviewed block manually", readme)
         self.assertIn("hook registration is skipped", readme)
-        self.assertIn("prints a diagnostic to stdout", docs)
-        self.assertNotIn("prints an error to stderr", docs)
+        self.assertIn("writes its diagnostic to stderr", docs)
+        self.assertNotIn("diagnostic to stdout", docs)
 
     def test_reviewed_through_has_one_authoritative_location(self) -> None:
         lessons = (REPO_ROOT / "LESSONS.md").read_text(encoding="utf-8")
@@ -194,6 +199,156 @@ class InstallerSecurityRegressionTests(unittest.TestCase):
         self.assertIn("single marker at the top of [`LESSONS.md`]", profile)
         self.assertNotIn("SHA reviewed through in the most recent completed review", profile)
         self.assertIn("not a second watermark store", runner)
+
+
+class InstallerProviderPreflightRegressionTests(unittest.TestCase):
+    @staticmethod
+    def _snapshot(path: pathlib.Path):
+        flags = os.O_RDONLY | getattr(os, "O_NOATIME", 0) | getattr(os, "O_NOFOLLOW", 0)
+        fd = os.open(path, flags)
+        try:
+            before = os.fstat(fd)
+            chunks = []
+            while True:
+                chunk = os.read(fd, 1024 * 1024)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+            attrs = {name: os.getxattr(fd, name) for name in os.listxattr(fd)}
+            after = os.fstat(fd)
+        finally:
+            os.close(fd)
+        fields = (
+            "st_dev", "st_ino", "st_size", "st_mode", "st_uid", "st_gid",
+            "st_nlink", "st_atime_ns", "st_mtime_ns", "st_ctime_ns",
+        )
+        return b"".join(chunks), tuple(getattr(before, name) for name in fields), attrs, tuple(
+            getattr(after, name) for name in fields
+        )
+
+    @staticmethod
+    def _write_state(target: pathlib.Path, provider: str, state: str):
+        relative, command = PROVIDER_SETTINGS[provider]
+        path = target / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if state == "normal":
+            return path
+        if state == "conflict":
+            payload = {
+                "ownerNote": "preserve this setting",
+                "hooks": {
+                    "SessionStart": [{
+                        "matcher": "startup",
+                        "hooks": [{"type": "command", "command": "echo user-owned"}],
+                    }]
+                },
+            }
+            path.write_text(json.dumps(payload, separators=(",", ":")) + "\n", encoding="utf-8")
+        elif state == "invalid":
+            path.write_text("{ invalid JSON\n", encoding="utf-8")
+        else:
+            raise AssertionError(state)
+        return path
+
+    def _run(self, target: pathlib.Path):
+        return subprocess.run(
+            ["bash", str(INSTALLER), "--target", str(target)],
+            cwd=target,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            timeout=60,
+        )
+
+    def _assert_registered(self, target: pathlib.Path, provider: str):
+        relative, command = PROVIDER_SETTINGS[provider]
+        config = json.loads((target / relative).read_text(encoding="utf-8"))
+        matching = [
+            (session, handler)
+            for session in config["hooks"]["SessionStart"]
+            for handler in session.get("hooks", [])
+            if isinstance(handler, dict) and handler.get("command") == command
+        ]
+        self.assertEqual(len(matching), 1, f"{provider} hook missing or duplicated")
+        session, handler = matching[0]
+        self.assertEqual(handler.get("type"), "command", f"{provider} hook has wrong type")
+        self.assertEqual(
+            session.get("matcher"),
+            "startup|resume|clear|compact|fork",
+            f"{provider} hook does not cover all session-start sources",
+        )
+
+    def test_provider_preflight_full_three_by_three_matrix(self) -> None:
+        states = ("normal", "conflict", "invalid")
+        for codex_state in states:
+            for claude_state in states:
+                with self.subTest(codex=codex_state, claude=claude_state):
+                    with tempfile.TemporaryDirectory(prefix="installer-provider-matrix-") as temp_name:
+                        target = pathlib.Path(temp_name) / "project"
+                        init_git_target(target)
+                        before = {}
+                        for provider, state in (("codex", codex_state), ("claude", claude_state)):
+                            settings = self._write_state(target, provider, state)
+                            if state != "normal":
+                                before[provider] = self._snapshot(settings)
+
+                        result = self._run(target)
+                        has_invalid = "invalid" in (codex_state, claude_state)
+                        if has_invalid:
+                            self.assertNotEqual(result.returncode, 0, result.stdout)
+                            self.assertIn("no files were installed", result.stdout)
+                            self.assertFalse((target / "AGENTS.md").exists(), result.stdout)
+                            self.assertFalse((target / ".agent-maintenance/session-start.sh").exists())
+                            for provider, state in (("codex", codex_state), ("claude", claude_state)):
+                                relative, _ = PROVIDER_SETTINGS[provider]
+                                settings = target / relative
+                                if state == "normal":
+                                    self.assertFalse(settings.exists(), f"invalid preflight created {relative}")
+                                else:
+                                    self.assertEqual(self._snapshot(settings), before[provider])
+                            continue
+
+                        self.assertEqual(result.returncode, 0, result.stdout)
+                        self.assertTrue((target / "AGENTS.md").is_file())
+                        self.assertTrue((target / ".agent-maintenance/session-start.sh").is_file())
+                        for provider, state in (("codex", codex_state), ("claude", claude_state)):
+                            relative, _ = PROVIDER_SETTINGS[provider]
+                            settings = target / relative
+                            if state == "normal":
+                                self._assert_registered(target, provider)
+                            else:
+                                self.assertEqual(self._snapshot(settings), before[provider])
+                                self.assertIn("user-owned", self._snapshot(settings)[0].decode("utf-8"))
+
+    def test_wrong_handler_type_and_narrow_matcher_are_not_registered(self) -> None:
+        for provider in ("codex", "claude"):
+            relative, command = PROVIDER_SETTINGS[provider]
+            for variant in ("wrong-type", "narrow-matcher"):
+                with self.subTest(provider=provider, variant=variant):
+                    with tempfile.TemporaryDirectory(prefix="installer-hook-schema-") as temp_name:
+                        target = pathlib.Path(temp_name) / "project"
+                        init_git_target(target)
+                        settings = target / relative
+                        settings.parent.mkdir(parents=True)
+                        handler = {"type": "prompt" if variant == "wrong-type" else "command", "command": command}
+                        session = {
+                            "matcher": "startup" if variant == "narrow-matcher" else "*",
+                            "hooks": [handler],
+                        }
+                        settings.write_text(
+                            json.dumps({"hooks": {"SessionStart": [session]}}) + "\n",
+                            encoding="utf-8",
+                        )
+                        before = self._snapshot(settings)
+
+                        result = self._run(target)
+
+                        self.assertEqual(result.returncode, 0, result.stdout)
+                        self.assertEqual(self._snapshot(settings), before, "user hook settings were changed")
+                        self.assertTrue((target / "AGENTS.md").is_file())
+                        other_provider = "claude" if provider == "codex" else "codex"
+                        self._assert_registered(target, other_provider)
+                        self.assertIn(relative, result.stdout)
 
 
 class mock_os_rmdir:

@@ -96,7 +96,7 @@ cmp -s "$TMP_DIR/original-session-start.sh" "$conflict_target/.agent-maintenance
 [[ ! -e "$conflict_target/.claude/settings.json" ]] || fail "Claude hook settings were written despite the conflict"
 
 # A valid pre-existing provider config that needs a hook merge is preserved;
-# hook registration is skipped, but unrelated template files still install.
+# only that provider is skipped while the other provider is still installed.
 existing_config_target="$TMP_DIR/existing-config-target"
 init_git_target "$existing_config_target"
 mkdir -p "$existing_config_target/.codex"
@@ -107,8 +107,16 @@ cmp -s "$TMP_DIR/existing-config-before.json" "$existing_config_target/.codex/ho
   || fail "manual-merge config conflict changed the existing settings"
 [[ -f "$existing_config_target/AGENTS.md" && -f "$existing_config_target/prompts/bootstrap-project.md" ]] \
   || fail "a manual hook merge conflict blocked independent template files"
-[[ ! -e "$existing_config_target/.claude/settings.json" ]] \
-  || fail "installer registered another provider hook after detecting a manual merge conflict"
+[[ -f "$existing_config_target/.claude/settings.json" ]] \
+  || fail "Codex hook conflict incorrectly skipped Claude hook registration"
+python3 - "$existing_config_target/.claude/settings.json" <<'PY'
+import json
+import sys
+from pathlib import Path
+config = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+handlers = [handler for group in config["hooks"]["SessionStart"] for handler in group["hooks"]]
+assert any(handler.get("type") == "command" and handler.get("command") == 'bash "${CLAUDE_PROJECT_DIR}/.agent-maintenance/session-start.sh" claude' for handler in handlers)
+PY
 grep -Fq 'startup-hook registration is skipped' "$TMP_DIR/existing-config.log" \
   || fail "manual hook merge conflict was not reported"
 
@@ -117,7 +125,7 @@ grep -Fq 'startup-hook registration is skipped' "$TMP_DIR/existing-config.log" \
 invalid_claude_target="$TMP_DIR/invalid-claude-target"
 init_git_target "$invalid_claude_target"
 mkdir -p "$invalid_claude_target/.codex" "$invalid_claude_target/.claude"
-printf '%s\n' '{"hooks":{"SessionStart":[{"hooks":[{"command":"bash \"$(git rev-parse --show-toplevel)/.agent-maintenance/session-start.sh\" codex"}]}]}}' \
+printf '%s\n' '{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"bash \"$(git rev-parse --show-toplevel)/.agent-maintenance/session-start.sh\" codex"}]}]}}' \
   > "$invalid_claude_target/.codex/hooks.json"
 printf '{invalid json\n' > "$invalid_claude_target/.claude/settings.json"
 cp "$invalid_claude_target/.codex/hooks.json" "$TMP_DIR/codex-before-invalid-claude.json"
@@ -546,6 +554,7 @@ expected_path.write_text(json.dumps({
     "mode": stat.S_IMODE(info.st_mode),
     "atime_ns": info.st_atime_ns,
     "mtime_ns": info.st_mtime_ns,
+    "ctime_ns": info.st_ctime_ns,
     "attrs": {name: value.hex() for name, value in attrs.items()},
     "xattr_supported": xattr_supported,
 }), encoding="utf-8")
@@ -554,8 +563,16 @@ bash "$REPO_ROOT/install.sh" --target "$hook_metadata_target" > "$TMP_DIR/hook-m
   || fail "existing settings conflict prevented safe file-only installation"
 [[ -f "$hook_metadata_target/AGENTS.md" ]] \
   || fail "existing settings conflict blocked independent template files"
-[[ ! -e "$hook_metadata_target/.codex/hooks.json" ]] \
-  || fail "installer registered Codex after detecting a manual merge conflict"
+[[ -f "$hook_metadata_target/.codex/hooks.json" ]] \
+  || fail "Claude settings conflict incorrectly skipped Codex hook registration"
+python3 - "$hook_metadata_target/.codex/hooks.json" <<'PY'
+import json
+import sys
+from pathlib import Path
+config = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+handlers = [handler for group in config["hooks"]["SessionStart"] for handler in group["hooks"]]
+assert any(handler.get("type") == "command" and handler.get("command") == 'bash "$(git rev-parse --show-toplevel)/.agent-maintenance/session-start.sh" codex' for handler in handlers)
+PY
 grep -Fq 'startup-hook registration is skipped' "$TMP_DIR/hook-metadata.log" \
   || fail "existing settings conflict did not explain the skipped hook registration"
 python3 - "$hook_metadata_target/.claude/settings.json" "$TMP_DIR/hook-metadata-expected.json" "$TMP_DIR/hook-settings-original.json" <<'PY'
@@ -578,6 +595,7 @@ assert (info.st_uid, info.st_gid) == (expected["uid"], expected["gid"]), "hook s
 assert stat.S_IMODE(info.st_mode) == expected["mode"], "hook settings permissions changed"
 assert info.st_atime_ns == expected["atime_ns"], "hook settings atime changed"
 assert info.st_mtime_ns == expected["mtime_ns"], "hook settings mtime changed"
+assert info.st_ctime_ns == expected["ctime_ns"], "hook settings ctime changed"
 actual = {name: os.getxattr(filename, name).hex() for name in os.listxattr(filename)}
 assert actual == expected["attrs"], "hook settings extended attributes or ACL changed"
 PY
@@ -596,9 +614,10 @@ for root in "$session_target" "$session_claude_target"; do
     printf '# fixture\n' > "$root/$relative"
   done
 done
-if ! (cd "$session_target" && bash "$REPO_ROOT/.agent-maintenance/session-start.sh") > "$TMP_DIR/session-unmarked.log" 2>&1; then
+if ! (cd "$session_target" && bash "$REPO_ROOT/.agent-maintenance/session-start.sh") > "$TMP_DIR/session-unmarked.log" 2> "$TMP_DIR/session-unmarked.stderr"; then
   fail "session-start failed for an unmarked project"
 fi
+[[ ! -s "$TMP_DIR/session-unmarked.stderr" ]] || fail "normal bootstrap reminder was written to stderr"
 grep -Fq 'bootstrap reminder' "$TMP_DIR/session-unmarked.log" \
   || fail "session-start did not emit a bootstrap reminder for an unmarked project"
 grep -Fq 'must not preempt or interrupt' "$TMP_DIR/session-unmarked.log" \
@@ -936,10 +955,10 @@ for relative_path, command in expected.items():
         for session in config["hooks"]["SessionStart"]
         for handler in session.get("hooks", [])
     ]
-    assert any(handler.get("command") == command for handler in handlers), relative_path
+    assert any(handler.get("type") == "command" and handler.get("command") == command for handler in handlers), relative_path
 PY
 
-# A missing bootstrap prompt is diagnosed in stdout and reported as a hook error,
+# A missing bootstrap prompt is diagnosed in stderr and reported as a hook error,
 # without emitting normal bootstrap context or starting bootstrap itself.
 missing_prompt_target="$TMP_DIR/missing-prompt-target"
 init_git_target "$missing_prompt_target"
@@ -963,8 +982,8 @@ import sys
 from pathlib import Path
 stdout, stderr = (Path(path).read_bytes() for path in sys.argv[1:])
 expected = b"Self-Evolution Flywheel: prompts/bootstrap-project.md is missing; bootstrap cannot run. This hook did not perform bootstrap; restore the prompt before using ./install.sh --bootstrap codex|claude.\n"
-assert stdout == expected, f"unexpected missing-prompt stdout: {stdout!r}"
-assert stderr == b"", f"missing-prompt diagnostic was written to stderr: {stderr!r}"
+assert stderr == expected, f"unexpected missing-prompt stderr: {stderr!r}"
+assert stdout == b"", f"missing-prompt diagnostic was written to stdout: {stdout!r}"
 PY
 
 # A script streamed through stdin has no BASH_SOURCE path. Simulate git clone

@@ -29,8 +29,9 @@ Existing files are never overwritten. A different AGENTS.md is shown as a
 proposed diff and must be merged manually; the installer does not ask for
 confirmation when it cannot safely apply the change. Existing provider JSON is
 never rewritten: exact hooks are accepted, missing settings files are created,
-and if an existing settings file needs a hook added, hook registration is
-skipped while the other template files are still installed.
+and if an existing settings file needs a hook added, only that provider's hook
+registration is skipped; the other provider is still validated independently.
+Other template files are still installed when both settings files are valid.
 
 Options:
   --target DIR              Destination project root (default: current directory)
@@ -181,6 +182,7 @@ preflight_hook_config() {
   local settings_path="$2"
   python3 - "$provider" "$settings_path" "$TARGET_DIR" "$TRANSACTION_HELPER" <<'PY'
 import json
+import errno
 import os
 import stat
 import subprocess
@@ -194,10 +196,14 @@ def open_checked_settings(path, expected):
         raise OSError("platform cannot safely open settings without following symbolic links")
 
     def opener(name, flags):
-        return os.open(
-            name,
-            flags | nofollow | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_CLOEXEC", 0),
-        )
+        safe_flags = flags | nofollow | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_CLOEXEC", 0)
+        noatime = getattr(os, "O_NOATIME", 0)
+        try:
+            return os.open(name, safe_flags | noatime)
+        except OSError as exc:
+            if not noatime or exc.errno not in {errno.EPERM, errno.EINVAL, errno.EOPNOTSUPP, errno.ENOTSUP}:
+                raise
+            return os.open(name, safe_flags)
 
     handle = open(path, encoding="utf-8", opener=opener)
     try:
@@ -246,10 +252,11 @@ try:
             try:
                 config = json.load(handle)
             finally:
-                os.utime(
-                    handle.fileno(),
-                    ns=(opened.st_atime_ns, opened.st_mtime_ns),
-                )
+                if os.fstat(handle.fileno()).st_atime_ns != opened.st_atime_ns:
+                    os.utime(
+                        handle.fileno(),
+                        ns=(opened.st_atime_ns, opened.st_mtime_ns),
+                    )
         finally:
             handle.close()
     else:
@@ -270,18 +277,42 @@ if not isinstance(sessions, list):
     print(f"ERROR: {filename}: 'hooks.SessionStart' must be a JSON array; no files were installed.", file=sys.stderr)
     sys.exit(3)
 for session in sessions:
-    if isinstance(session, dict) and not isinstance(session.get("hooks", []), list):
+    if not isinstance(session, dict):
+        print(f"ERROR: {filename}: each SessionStart entry must be a JSON object; no files were installed.", file=sys.stderr)
+        sys.exit(3)
+    if "matcher" in session and not isinstance(session["matcher"], str):
+        print(f"ERROR: {filename}: each SessionStart matcher must be a string; no files were installed.", file=sys.stderr)
+        sys.exit(3)
+    handlers = session.get("hooks")
+    if not isinstance(handlers, list):
         print(f"ERROR: {filename}: each SessionStart 'hooks' value must be a JSON array; no files were installed.", file=sys.stderr)
         sys.exit(3)
+    for handler in handlers:
+        if not isinstance(handler, dict) or not isinstance(handler.get("type"), str):
+            print(f"ERROR: {filename}: each SessionStart hook must be an object with a string 'type'; no files were installed.", file=sys.stderr)
+            sys.exit(3)
+        if handler["type"] == "command" and not isinstance(handler.get("command"), str):
+            print(f"ERROR: {filename}: each command SessionStart hook must have a string 'command'; no files were installed.", file=sys.stderr)
+            sys.exit(3)
 
 hook_commands = {
     "codex": 'bash "$(git rev-parse --show-toplevel)/.agent-maintenance/session-start.sh" codex',
     "claude": 'bash "${CLAUDE_PROJECT_DIR}/.agent-maintenance/session-start.sh" claude',
 }
+all_session_sources_matcher = "startup|resume|clear|compact|fork"
+
+def matcher_covers_all_sources(session):
+    if "matcher" not in session:
+        return True
+    return session["matcher"] in ("", "*", ".*", all_session_sources_matcher)
+
 registered = any(
     isinstance(session, dict)
+    and matcher_covers_all_sources(session)
     and any(
-        isinstance(handler, dict) and handler.get("command") == hook_commands[provider]
+        isinstance(handler, dict)
+        and handler.get("type") == "command"
+        and handler.get("command") == hook_commands[provider]
         for handler in session.get("hooks", [])
     )
     for session in sessions
@@ -295,34 +326,39 @@ if os.path.lexists(filename) and not registered:
 PY
 }
 
-# Validate provider settings before installing any template files. A valid
-# pre-existing settings file that needs a manual merge disables hook registration
-# for this run, but does not block independent template-file installation.
-hook_config_conflict=0
+# Validate both provider settings independently before installing any template
+# files. A valid conflict skips only that provider's hook registration.
+CODEX_HOOKS_ENABLED=0
+CLAUDE_HOOKS_ENABLED=0
+hook_config_conflicts=()
+codex_preflight_error=0
+claude_preflight_error=0
 if [[ "$INSTALL_HOOKS" == 1 ]]; then
   if preflight_hook_config codex "$TARGET_DIR/.codex/hooks.json"; then
-    :
+    CODEX_HOOKS_ENABLED=1
   else
     preflight_status=$?
     if ((preflight_status == 11)); then
-      INSTALL_HOOKS=0
-      hook_config_conflict=1
+      hook_config_conflicts+=(".codex/hooks.json")
     else
-      exit "$preflight_status"
+      codex_preflight_error=$preflight_status
     fi
   fi
-  if [[ "$INSTALL_HOOKS" == 1 ]]; then
-    if preflight_hook_config claude "$TARGET_DIR/.claude/settings.json"; then
-      :
+  if preflight_hook_config claude "$TARGET_DIR/.claude/settings.json"; then
+    CLAUDE_HOOKS_ENABLED=1
+  else
+    preflight_status=$?
+    if ((preflight_status == 11)); then
+      hook_config_conflicts+=(".claude/settings.json")
     else
-      preflight_status=$?
-      if ((preflight_status == 11)); then
-        INSTALL_HOOKS=0
-        hook_config_conflict=1
-      else
-        exit "$preflight_status"
-      fi
+      claude_preflight_error=$preflight_status
     fi
+  fi
+  if ((codex_preflight_error)); then
+    exit "$codex_preflight_error"
+  fi
+  if ((claude_preflight_error)); then
+    exit "$claude_preflight_error"
   fi
 fi
 
@@ -342,14 +378,15 @@ fi
 # Detect predictable destination permission failures before writing any template
 # files or provider settings. This checks only paths that would actually change.
 preflight_write_access() {
-  python3 - "$SOURCE_DIR" "$TARGET_DIR" "$INSTALL_HOOKS" "${files[@]}" <<'PY'
+  python3 - "$SOURCE_DIR" "$TARGET_DIR" "$CODEX_HOOKS_ENABLED" "$CLAUDE_HOOKS_ENABLED" "${files[@]}" <<'PY'
 import filecmp
 import json
+import errno
 import os
 import stat
 import sys
 
-source_dir, target_dir, hooks_enabled, *relative_files = sys.argv[1:]
+source_dir, target_dir, codex_hooks_enabled, claude_hooks_enabled, *relative_files = sys.argv[1:]
 needed_directories = set()
 
 def open_checked_settings(path, expected):
@@ -358,10 +395,14 @@ def open_checked_settings(path, expected):
         raise OSError("platform cannot safely open settings without following symbolic links")
 
     def opener(name, flags):
-        return os.open(
-            name,
-            flags | nofollow | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_CLOEXEC", 0),
-        )
+        safe_flags = flags | nofollow | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_CLOEXEC", 0)
+        noatime = getattr(os, "O_NOATIME", 0)
+        try:
+            return os.open(name, safe_flags | noatime)
+        except OSError as exc:
+            if not noatime or exc.errno not in {errno.EPERM, errno.EINVAL, errno.EOPNOTSUPP, errno.ENOTSUP}:
+                raise
+            return os.open(name, safe_flags)
 
     handle = open(path, encoding="utf-8", opener=opener)
     try:
@@ -398,12 +439,15 @@ for relative in relative_files:
         continue
     needed_directories.add(os.path.dirname(destination))
 
-if hooks_enabled == "1":
-    hook_commands = {
-        ".codex/hooks.json": 'bash "$(git rev-parse --show-toplevel)/.agent-maintenance/session-start.sh" codex',
-        ".claude/settings.json": 'bash "${CLAUDE_PROJECT_DIR}/.agent-maintenance/session-start.sh" claude',
+if codex_hooks_enabled == "1" or claude_hooks_enabled == "1":
+    hook_settings = {
+        ".codex/hooks.json": ("codex", codex_hooks_enabled, 'bash "$(git rev-parse --show-toplevel)/.agent-maintenance/session-start.sh" codex'),
+        ".claude/settings.json": ("claude", claude_hooks_enabled, 'bash "${CLAUDE_PROJECT_DIR}/.agent-maintenance/session-start.sh" claude'),
     }
-    for relative, command in hook_commands.items():
+    all_session_sources_matcher = "startup|resume|clear|compact|fork"
+    for relative, (provider, enabled, command) in hook_settings.items():
+        if enabled != "1":
+            continue
         filename = os.path.join(target_dir, relative)
         config = {}
         if os.path.lexists(filename):
@@ -418,10 +462,11 @@ if hooks_enabled == "1":
                     try:
                         config = json.load(handle)
                     finally:
-                        os.utime(
-                            handle.fileno(),
-                            ns=(opened.st_atime_ns, opened.st_mtime_ns),
-                        )
+                        if os.fstat(handle.fileno()).st_atime_ns != opened.st_atime_ns:
+                            os.utime(
+                                handle.fileno(),
+                                ns=(opened.st_atime_ns, opened.st_mtime_ns),
+                            )
                 finally:
                     handle.close()
             except Exception as exc:
@@ -433,8 +478,14 @@ if hooks_enabled == "1":
         sessions = config.get("hooks", {}).get("SessionStart", [])
         already_registered = any(
             isinstance(session, dict)
+            and (
+                "matcher" not in session
+                or session.get("matcher") in ("", "*", ".*", all_session_sources_matcher)
+            )
             and any(
-                isinstance(handler, dict) and handler.get("command") == command
+                isinstance(handler, dict)
+                and handler.get("type") == "command"
+                and handler.get("command") == command
                 for handler in session.get("hooks", [])
             )
             for session in sessions
@@ -693,8 +744,10 @@ merge_hook_config() {
   printf '%s %s\n' "$result" "$settings_path"
 }
 
-if [[ "$INSTALL_HOOKS" == 1 ]]; then
+if [[ "$CODEX_HOOKS_ENABLED" == 1 ]]; then
   merge_hook_config codex "$TARGET_DIR/.codex/hooks.json"
+fi
+if [[ "$CLAUDE_HOOKS_ENABLED" == 1 ]]; then
   merge_hook_config claude "$TARGET_DIR/.claude/settings.json"
 fi
 
@@ -708,10 +761,11 @@ echo "Some existing project files were preserved. Review/merge these if you want
   printf '  - %s\n' "${conflicts[@]}"
 fi
 
-if [[ "$INSTALL_HOOKS" == 1 ]]; then
+if ((CODEX_HOOKS_ENABLED || CLAUDE_HOOKS_ENABLED)); then
   cat <<'NOTICE'
 
-Startup hooks are registered in project-local settings. They only check for
+Startup hooks are registered where provider settings allowed safe registration.
+They only check for
 .agent-maintenance/bootstrap-complete and required project documents, then print
 a reminder; they do not run bootstrap, start a model, or fetch network content.
 Codex/Claude Code may require you to review/trust the project hook before it
@@ -719,8 +773,9 @@ runs. See docs/installation.md.
 NOTICE
 fi
 
-if ((hook_config_conflict)); then
-  echo "NOTICE: template files were installed, but startup hooks were not registered because an existing provider settings file needs a manual merge."
+if ((${#hook_config_conflicts[@]})); then
+  printf 'NOTICE: startup-hook registration was skipped for existing provider settings that need a manual merge: %s.\n' \
+    "${hook_config_conflicts[*]}"
 fi
 
 if ((manual_merge_required)); then

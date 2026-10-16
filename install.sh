@@ -175,7 +175,7 @@ try:
         if not stat.S_ISREG(info.st_mode):
             raise OSError("settings path is not a regular file")
         if info.st_nlink > 1:
-            raise OSError("atomic replacement would break hard links")
+            raise OSError("hard-linked settings files are not accepted")
         for name in os.listxattr(filename, follow_symlinks=False):
             os.getxattr(filename, name, follow_symlinks=False)
         with open(filename, encoding="utf-8") as handle:
@@ -204,6 +204,25 @@ for session in sessions:
     if isinstance(session, dict) and not isinstance(session.get("hooks", []), list):
         print(f"ERROR: {filename}: each SessionStart 'hooks' value must be a JSON array; no files were installed.", file=sys.stderr)
         sys.exit(3)
+
+hook_commands = {
+    "codex": 'bash "$(git rev-parse --show-toplevel)/.agent-maintenance/session-start.sh" codex',
+    "claude": 'bash "${CLAUDE_PROJECT_DIR}/.agent-maintenance/session-start.sh" claude',
+}
+registered = any(
+    isinstance(session, dict)
+    and any(
+        isinstance(handler, dict) and handler.get("command") == hook_commands[provider]
+        for handler in session.get("hooks", [])
+    )
+    for session in sessions
+)
+if os.path.lexists(filename) and not registered:
+    print(
+        f"ERROR: cannot safely merge into pre-existing {filename}: POSIX has no portable conditional replace for non-cooperative writers; file preserved. Add the hook manually or use --no-hooks; no files were installed.",
+        file=sys.stderr,
+    )
+    sys.exit(3)
 PY
 }
 
@@ -331,7 +350,7 @@ installer_cleanup() {
   if ((status != 0 && transaction_active)); then
     echo "ERROR: installation write failed; attempting to roll back this install." >&2
     if ! rollback_transaction; then
-      echo "ERROR: rollback was incomplete; concurrent changes were preserved where detected." >&2
+      echo "ERROR: rollback was incomplete; uncertain files and recovery entries were preserved rather than deleted." >&2
       retain_work_dir=1
     fi
   fi
@@ -397,62 +416,6 @@ for line in iter(process.stdout.readline, b""):
     sys.stdout.buffer.flush()
 process.stdout.close()
 sys.exit(process.wait())
-PY
-}
-
-preserve_managed_agents_metadata() {
-  python3 - "$1" "$2" <<'PY'
-import os
-import stat
-import sys
-
-source, staged = sys.argv[1:]
-try:
-    original = os.stat(source, follow_symlinks=False)
-    if not stat.S_ISREG(original.st_mode):
-        raise OSError("source is no longer a regular file")
-    if original.st_nlink > 1:
-        raise OSError("atomic replacement would break hard links")
-
-    attributes = {
-        name: os.getxattr(source, name, follow_symlinks=False)
-        for name in os.listxattr(source, follow_symlinks=False)
-    }
-    staged_stat = os.stat(staged, follow_symlinks=False)
-    if (staged_stat.st_uid, staged_stat.st_gid) != (original.st_uid, original.st_gid):
-        os.chown(staged, original.st_uid, original.st_gid, follow_symlinks=False)
-    os.chmod(staged, stat.S_IMODE(original.st_mode), follow_symlinks=False)
-
-    for name in os.listxattr(staged, follow_symlinks=False):
-        if name not in attributes:
-            os.removexattr(staged, name, follow_symlinks=False)
-    for name, value in attributes.items():
-        os.setxattr(staged, name, value, follow_symlinks=False)
-    os.utime(
-        staged,
-        ns=(original.st_atime_ns, original.st_mtime_ns),
-        follow_symlinks=False,
-    )
-
-    result = os.stat(staged, follow_symlinks=False)
-    result_attributes = {
-        name: os.getxattr(staged, name, follow_symlinks=False)
-        for name in os.listxattr(staged, follow_symlinks=False)
-    }
-    if (
-        (result.st_uid, result.st_gid) != (original.st_uid, original.st_gid)
-        or stat.S_IMODE(result.st_mode) != stat.S_IMODE(original.st_mode)
-        or result.st_atime_ns != original.st_atime_ns
-        or result.st_mtime_ns != original.st_mtime_ns
-        or result_attributes != attributes
-    ):
-        raise OSError("staged metadata did not match the original")
-except (OSError, AttributeError, NotImplementedError):
-    print(
-        "ERROR: could not safely preserve AGENTS.md ownership, permissions, ACLs, or extended attributes; left unchanged.",
-        file=sys.stderr,
-    )
-    sys.exit(1)
 PY
 }
 
@@ -571,27 +534,15 @@ PY
     rm -f "$stage_file"
     return 1
   fi
-  if ! preserve_managed_agents_metadata "$destination_path" "$stage_file"; then
-    echo "PRESERVED AGENTS.md: could not safely preserve the original file metadata; left unchanged." >&2
-    rm -f "$stage_file"
-    return 1
-  fi
-  if ! python3 "$TRANSACTION_HELPER" replace "$TARGET_DIR" "AGENTS.md" "$stage_file" "$baseline" "$transaction_state"; then
-    echo "PRESERVED AGENTS.md: could not apply the confirmed managed routing change." >&2
-    rm -f "$stage_file"
-    exit 3
-  fi
-  if [[ "$action" == "insert" ]]; then
-    echo "INSERTED managed routing block at the beginning of AGENTS.md"
-  else
-    echo "UPDATED managed routing block in AGENTS.md"
-  fi
-  return 0
+  echo "PRESERVED AGENTS.md: safe automatic replacement is unavailable for non-cooperative writers; merge the reviewed block manually." >&2
+  rm -f "$stage_file"
+  return 3
 }
 
 prompt_ready=0
 conflicts=()
 confirmation_required=0
+manual_merge_required=0
 for relative_path in "${files[@]}"; do
   source_path="$SOURCE_DIR/$relative_path"
   destination_path="$TARGET_DIR/$relative_path"
@@ -612,6 +563,8 @@ for relative_path in "${files[@]}"; do
         conflicts+=("$relative_path")
         if ((managed_status == 2)); then
           confirmation_required=1
+        elif ((managed_status == 3)); then
+          manual_merge_required=1
         fi
       fi
       continue
@@ -673,6 +626,11 @@ Startup hooks are registered in project-local settings. They only check for
 run shell commands from the project or fetch network content. Codex/Claude Code
 may require you to review/trust the project hook before it runs. See docs/installation.md.
 NOTICE
+fi
+
+if ((manual_merge_required)); then
+  echo "ERROR: installation incomplete: the reviewed AGENTS.md block was not applied because conditional replacement is unavailable; merge it manually." >&2
+  exit 4
 fi
 
 if ((confirmation_required)); then

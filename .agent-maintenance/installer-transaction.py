@@ -2,6 +2,7 @@
 """Descriptor-relative file operations and conservative rollback for install.sh."""
 
 import base64
+import ctypes
 import hashlib
 import json
 import os
@@ -9,7 +10,6 @@ import secrets
 import stat
 import sys
 import time
-from pathlib import Path
 
 
 class InstallError(Exception):
@@ -93,7 +93,17 @@ def open_parent(root_fd, relative, create, state, state_path):
                     raise
                 os.mkdir(component, 0o777, dir_fd=fd)
                 state["created_directories"].append("/".join(walked))
-                save_state(state_path, state)
+                try:
+                    save_state(state_path, state)
+                except Exception:
+                    try:
+                        os.rmdir(component, dir_fd=fd)
+                    except OSError as cleanup_error:
+                        print(
+                            f"PRESERVED directory created before transaction journal failure: {'/'.join(walked)} ({cleanup_error})",
+                            file=sys.stderr,
+                        )
+                    raise
                 next_fd = os.open(component, DIR_FLAGS | NOFOLLOW, dir_fd=fd)
             os.close(fd)
             fd = next_fd
@@ -101,6 +111,54 @@ def open_parent(root_fd, relative, create, state, state_path):
     except Exception:
         os.close(fd)
         raise
+
+
+def verify_parent(root, root_fd, relative, parent_fd):
+    """Re-resolve the project path and ensure the held parent is still beneath it."""
+    current_fd = None
+    parent_check_fd = None
+    try:
+        current_fd = open_root(root)
+        root_info = os.fstat(root_fd)
+        current_root_info = os.fstat(current_fd)
+        if (root_info.st_dev, root_info.st_ino) != (current_root_info.st_dev, current_root_info.st_ino):
+            return False
+        parent_check_fd = os.dup(current_fd)
+        for component in split_relative(relative)[:-1]:
+            next_fd = os.open(component, DIR_FLAGS | NOFOLLOW, dir_fd=parent_check_fd)
+            os.close(parent_check_fd)
+            parent_check_fd = next_fd
+        expected = os.fstat(parent_fd)
+        actual = os.fstat(parent_check_fd)
+        return (expected.st_dev, expected.st_ino) == (actual.st_dev, actual.st_ino)
+    except (OSError, InstallError):
+        return False
+    finally:
+        if parent_check_fd is not None:
+            os.close(parent_check_fd)
+        if current_fd is not None:
+            os.close(current_fd)
+
+
+def rename_noreplace(parent_fd, source, destination):
+    """Move an entry only if the recovery name is still absent; fail closed if unavailable."""
+    libc = ctypes.CDLL(None, use_errno=True)
+    if sys.platform == "darwin":
+        function_name, flag = "renameatx_np", 0x00000004  # RENAME_EXCL
+    elif sys.platform.startswith("linux"):
+        function_name, flag = "renameat2", 0x00000001  # RENAME_NOREPLACE
+    else:
+        raise InstallError("this platform has no supported atomic no-replace rename for rollback")
+    try:
+        function = getattr(libc, function_name)
+    except AttributeError as exc:
+        raise InstallError("atomic no-replace rename is unavailable; rollback left the file in place") from exc
+    function.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]
+    function.restype = ctypes.c_int
+    result = function(parent_fd, os.fsencode(source), parent_fd, os.fsencode(destination), flag)
+    if result != 0:
+        error = ctypes.get_errno()
+        raise OSError(error, os.strerror(error), destination)
 
 
 def xattrs(fd):
@@ -149,18 +207,6 @@ def same_identity(left, right):
     ))
 
 
-def metadata(fd):
-    info = os.fstat(fd)
-    return {
-        "mode": stat.S_IMODE(info.st_mode),
-        "uid": info.st_uid,
-        "gid": info.st_gid,
-        "atime_ns": info.st_atime_ns,
-        "mtime_ns": info.st_mtime_ns,
-        "xattrs": xattrs(fd),
-    }
-
-
 def read_open_file(fd, preserve_times=True):
     info = os.fstat(fd)
     if not stat.S_ISREG(info.st_mode):
@@ -190,7 +236,7 @@ def open_existing(parent_fd, name, reject_hardlinks=True):
     fd = os.open(name, os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | NOFOLLOW | getattr(os, "O_NONBLOCK", 0), dir_fd=parent_fd)
     if reject_hardlinks and os.fstat(fd).st_nlink > 1:
         os.close(fd)
-        raise InstallError("atomic replacement would break hard links")
+        raise InstallError("destination has multiple hard links; refusing to modify it")
     return fd
 
 
@@ -199,46 +245,10 @@ def inspect_existing(parent_fd, name, allow_hardlinks=False):
     if fd is None:
         return None
     try:
-        info = os.fstat(fd)
         data = read_open_file(fd)
-        return {
-            "data": data,
-            "meta": metadata(fd),
-            "identity": identity(fd),
-            "stat": {
-                "device": info.st_dev,
-                "inode": info.st_ino,
-            "size": info.st_size,
-            "mtime_ns": info.st_mtime_ns,
-            "nlink": info.st_nlink,
-            },
-        }
+        return {"data": data}
     finally:
         os.close(fd)
-
-
-def write_backup(filename, data):
-    fd = os.open(filename, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    try:
-        view = memoryview(data)
-        while view:
-            written = os.write(fd, view)
-            view = view[written:]
-        os.fsync(fd)
-    finally:
-        os.close(fd)
-
-
-def snapshot_existing(parent_fd, name, state_path, op_index, expected=None):
-    current = inspect_existing(parent_fd, name)
-    if current is None:
-        return None
-    if expected and not same_identity(current["identity"], expected):
-        raise InstallError("destination changed while it was being prepared")
-    state_dir = os.path.dirname(state_path)
-    backup = os.path.join(state_dir, f"rollback-{op_index}")
-    write_backup(backup, current["data"])
-    return {"identity": current["identity"], "meta": current["meta"], "backup": backup}
 
 
 def apply_metadata(fd, values):
@@ -333,14 +343,20 @@ def op_copy(root, relative, source, state_path):
     temp_fd = None
     try:
         parent_fd, name = open_parent(root_fd, relative, True, state, state_path)
+        if not verify_parent(root, root_fd, relative, parent_fd):
+            raise InstallError(f"target directory moved or changed after it was opened; refusing write: {relative}")
         if path_exists(parent_fd, name):
             print("EXISTS")
             raise SystemExit(10)
         data, values = source_file(source)
+        if not verify_parent(root, root_fd, relative, parent_fd):
+            raise InstallError(f"target directory moved or changed before staging: {relative}")
         temporary, temp_fd, expected = new_temp(parent_fd, name, data, values)
-        operation = {"path": relative, "existed": False, "expected": expected}
+        operation = {"path": relative, "expected": expected}
         state["operations"].append(operation)
         save_state(state_path, state)
+        if not verify_parent(root, root_fd, relative, parent_fd):
+            raise InstallError(f"target directory moved or changed before publishing; staged file was not installed: {relative}")
         try:
             os.link(temporary, name, src_dir_fd=parent_fd, dst_dir_fd=parent_fd, follow_symlinks=False)
         except FileExistsError:
@@ -348,71 +364,12 @@ def op_copy(root, relative, source, state_path):
             save_state(state_path, state)
             print("EXISTS")
             raise SystemExit(10)
+        if not verify_parent(root, root_fd, relative, parent_fd):
+            print(f"PRESERVED file written through a directory moved during publication: {relative}", file=sys.stderr)
+            raise InstallError(f"target directory moved during publication; rollback will preserve uncertain data: {relative}")
         os.unlink(temporary, dir_fd=parent_fd)
         temporary = None
         print("INSTALLED")
-    finally:
-        if temp_fd is not None:
-            os.close(temp_fd)
-        if temporary is not None and parent_fd is not None:
-            try:
-                os.unlink(temporary, dir_fd=parent_fd)
-            except OSError:
-                pass
-        if parent_fd is not None:
-            os.close(parent_fd)
-        os.close(root_fd)
-
-
-def read_stage(path):
-    fd = os.open(path, os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | NOFOLLOW)
-    try:
-        info = os.fstat(fd)
-        if not stat.S_ISREG(info.st_mode):
-            raise InstallError("staged file is not regular")
-        return read_open_file(fd, preserve_times=False)
-    finally:
-        os.close(fd)
-
-
-def check_current(parent_fd, name, expected):
-    current = inspect_existing(parent_fd, name)
-    if current is None or not same_identity(current["identity"], expected):
-        raise InstallError("destination changed concurrently; no replacement was applied")
-    return current
-
-
-def op_replace(root, relative, staged, baseline, state_path):
-    state = load_state(state_path)
-    root_fd = open_root(root)
-    parent_fd = None
-    temporary = None
-    temp_fd = None
-    try:
-        parent_fd, name = open_parent(root_fd, relative, False, state, state_path)
-        original = inspect_existing(parent_fd, name)
-        if original is None:
-            raise InstallError("AGENTS.md disappeared before the confirmed update")
-        if read_stage(baseline) != original["data"]:
-            raise InstallError("AGENTS.md changed while awaiting confirmation; review and retry")
-        op_index = len(state["operations"])
-        snapshot = snapshot_existing(parent_fd, name, state_path, op_index, original["identity"])
-        data = read_stage(staged)
-        temporary, temp_fd, expected = new_temp(parent_fd, name, data, snapshot["meta"])
-        operation = {
-            "path": relative,
-            "existed": True,
-            "original": snapshot["identity"],
-            "backup": snapshot["backup"],
-            "meta": snapshot["meta"],
-            "expected": expected,
-        }
-        state["operations"].append(operation)
-        save_state(state_path, state)
-        check_current(parent_fd, name, snapshot["identity"])
-        os.replace(temporary, name, src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
-        temporary = None
-        print("REPLACED")
     finally:
         if temp_fd is not None:
             os.close(temp_fd)
@@ -469,6 +426,8 @@ def op_merge_hook(root, provider, relative, state_path):
     temp_fd = None
     try:
         parent_fd, name = open_parent(root_fd, relative, True, state, state_path)
+        if not verify_parent(root, root_fd, relative, parent_fd):
+            raise InstallError(f"target directory moved or changed after it was opened; refusing settings write: {relative}")
         original = inspect_existing(parent_fd, name)
         config = {}
         if original is not None:
@@ -486,48 +445,39 @@ def op_merge_hook(root, provider, relative, state_path):
                 if isinstance(handler, dict) and handler.get("command") == command:
                     print("HOOK PRESENT")
                     return
+        if original is not None:
+            fail(
+                f"cannot safely replace pre-existing {relative}: POSIX has no portable conditional replace for non-cooperative writers; file preserved, merge the hook manually",
+                status=11,
+            )
         sessions.append(entry)
         payload = (json.dumps(config, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
-        if original is None:
-            template = {
-                "mode": 0o644,
-                "uid": os.geteuid(),
-                "gid": os.getegid(),
-                "atime_ns": time.time_ns(),
-                "mtime_ns": time.time_ns(),
-                "xattrs": {},
-            }
-            backup = None
-            old_identity = None
-        else:
-            if original["stat"]["nlink"] > 1:
-                raise InstallError("atomic replacement would break hard links")
-            op_index = len(state["operations"])
-            snapshot = snapshot_existing(parent_fd, name, state_path, op_index, original["identity"])
-            template = snapshot["meta"]
-            backup = snapshot["backup"]
-            old_identity = snapshot["identity"]
-        temporary, temp_fd, expected = new_temp(parent_fd, name, payload, template)
-        operation = {
-            "path": relative,
-            "existed": original is not None,
-            "original": old_identity,
-            "backup": backup,
-            "meta": template if original is not None else None,
-            "expected": expected,
+        template = {
+            "mode": 0o644,
+            "uid": os.geteuid(),
+            "gid": os.getegid(),
+            "atime_ns": time.time_ns(),
+            "mtime_ns": time.time_ns(),
+            "xattrs": {},
         }
+        if not verify_parent(root, root_fd, relative, parent_fd):
+            raise InstallError(f"target directory moved or changed before staging settings: {relative}")
+        temporary, temp_fd, expected = new_temp(parent_fd, name, payload, template)
+        operation = {"path": relative, "expected": expected}
         state["operations"].append(operation)
         save_state(state_path, state)
-        if old_identity:
-            check_current(parent_fd, name, old_identity)
-            os.replace(temporary, name, src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
-        else:
-            if path_exists(parent_fd, name):
-                state["operations"].pop()
-                save_state(state_path, state)
-                raise InstallError(f"{relative} appeared while its hook was being prepared")
+        if not verify_parent(root, root_fd, relative, parent_fd):
+            raise InstallError(f"target directory moved or changed before publishing settings; staged file was not installed: {relative}")
+        try:
             os.link(temporary, name, src_dir_fd=parent_fd, dst_dir_fd=parent_fd, follow_symlinks=False)
-            os.unlink(temporary, dir_fd=parent_fd)
+        except FileExistsError:
+            state["operations"].pop()
+            save_state(state_path, state)
+            raise InstallError(f"{relative} appeared while its hook was being prepared; it was preserved")
+        if not verify_parent(root, root_fd, relative, parent_fd):
+            print(f"PRESERVED settings written through a directory moved during publication: {relative}", file=sys.stderr)
+            raise InstallError(f"target directory moved during settings publication; rollback will preserve uncertain data: {relative}")
+        os.unlink(temporary, dir_fd=parent_fd)
         temporary = None
         print("HOOK ADDED")
     finally:
@@ -541,21 +491,6 @@ def op_merge_hook(root, provider, relative, state_path):
         if parent_fd is not None:
             os.close(parent_fd)
         os.close(root_fd)
-
-
-def restore_backup(parent_fd, name, operation):
-    with open(operation["backup"], "rb") as handle:
-        data = handle.read()
-    temporary, fd, _expected = new_temp(parent_fd, name, data, operation["meta"])
-    try:
-        # link is atomic and does not overwrite an external file that appeared meanwhile.
-        os.link(temporary, name, src_dir_fd=parent_fd, dst_dir_fd=parent_fd, follow_symlinks=False)
-    finally:
-        os.close(fd)
-        try:
-            os.unlink(temporary, dir_fd=parent_fd)
-        except OSError:
-            pass
 
 
 def signature_at(parent_fd, name):
@@ -579,47 +514,38 @@ def rollback(root, state_path):
             quarantine = None
             try:
                 parent_fd, name = open_parent(root_fd, relative, False, state, state_path)
+                if not verify_parent(root, root_fd, relative, parent_fd):
+                    print(f"PRESERVED file; destination directory moved or changed before rollback: {relative}", file=sys.stderr)
+                    incomplete = True
+                    continue
                 current = signature_at(parent_fd, name)
                 if current is None:
-                    if operation["existed"]:
-                        print(f"PRESERVED concurrent removal; rollback skipped: {relative}", file=sys.stderr)
-                        incomplete = True
-                    continue
-                if same_identity(current, operation.get("original")) and operation["existed"]:
                     continue
                 if not same_identity(current, operation["expected"]):
                     print(f"PRESERVED concurrent change; rollback skipped: {relative}", file=sys.stderr)
                     incomplete = True
                     continue
-                # Move the exact installer-produced directory entry aside before undoing it.
-                # This prevents an intervening replacement from being blindly unlinked.
+                # Keep the moved inode under a recovery name: another process may
+                # still hold a writable descriptor and change it after this check.
                 quarantine = f".{name}.rollback-{os.getpid()}-{secrets.token_hex(5)}"
-                os.rename(name, quarantine, src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
+                rename_noreplace(parent_fd, name, quarantine)
+                if not verify_parent(root, root_fd, relative, parent_fd):
+                    print(f"PRESERVED recovery file in a directory moved during rollback: {relative} ({quarantine})", file=sys.stderr)
+                    incomplete = True
+                    continue
                 moved = signature_at(parent_fd, quarantine)
                 if not same_identity(moved, operation["expected"]):
                     try:
                         os.link(quarantine, name, src_dir_fd=parent_fd, dst_dir_fd=parent_fd, follow_symlinks=False)
-                        os.unlink(quarantine, dir_fd=parent_fd)
-                        quarantine = None
                     except OSError:
                         print(f"PRESERVED changed file in recovery path {quarantine}: {relative}", file=sys.stderr)
                     incomplete = True
                     continue
-                if operation["existed"]:
-                    try:
-                        restore_backup(parent_fd, name, operation)
-                    except FileExistsError:
-                        print(f"PRESERVED concurrent replacement; rollback skipped: {relative}", file=sys.stderr)
-                        incomplete = True
-                        os.unlink(quarantine, dir_fd=parent_fd)
-                        quarantine = None
-                        continue
-                os.unlink(quarantine, dir_fd=parent_fd)
-                quarantine = None
+                print(f"PRESERVED rollback recovery file {quarantine}: {relative}", file=sys.stderr)
+                incomplete = True
             except FileNotFoundError:
-                if operation["existed"]:
-                    print(f"PRESERVED missing parent; rollback skipped: {relative}", file=sys.stderr)
-                    incomplete = True
+                print(f"PRESERVED missing parent; rollback skipped: {relative}", file=sys.stderr)
+                incomplete = True
             except OSError as exc:
                 print(f"ERROR: rollback could not safely process {relative}: {exc}", file=sys.stderr)
                 incomplete = True
@@ -627,17 +553,6 @@ def rollback(root, state_path):
                 print(f"ERROR: rollback could not safely process {relative}: {exc}", file=sys.stderr)
                 incomplete = True
             finally:
-                if quarantine and parent_fd is not None:
-                    try:
-                        if not path_exists(parent_fd, name):
-                            os.link(quarantine, name, src_dir_fd=parent_fd, dst_dir_fd=parent_fd, follow_symlinks=False)
-                            os.unlink(quarantine, dir_fd=parent_fd)
-                        else:
-                            print(f"PRESERVED recovery file {quarantine} in destination directory", file=sys.stderr)
-                            incomplete = True
-                    except OSError:
-                        print(f"PRESERVED recovery file {quarantine} in destination directory", file=sys.stderr)
-                        incomplete = True
                 if parent_fd is not None:
                     os.close(parent_fd)
         for relative in reversed(state["created_directories"]):
@@ -696,8 +611,6 @@ def main(argv):
             snapshot_command(argv[1], argv[2], argv[3])
         elif command == "copy" and len(argv) == 5:
             op_copy(argv[1], argv[2], argv[3], argv[4])
-        elif command == "replace" and len(argv) == 6:
-            op_replace(argv[1], argv[2], argv[3], argv[4], argv[5])
         elif command == "merge-hook" and len(argv) == 5:
             op_merge_hook(argv[1], argv[2], argv[3], argv[4])
         elif command == "rollback" and len(argv) == 3:

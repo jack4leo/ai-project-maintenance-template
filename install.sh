@@ -39,6 +39,7 @@ USAGE
 }
 
 SOURCE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+ORIGINAL_ARGS=("$@")
 TARGET_DIR="$PWD"
 TRANSACTION_HELPER="$SOURCE_DIR/.agent-maintenance/installer-transaction.py"
 [[ -f "$TRANSACTION_HELPER" ]] || {
@@ -105,6 +106,22 @@ if [[ "$INSTALL_HOOKS" == 1 ]]; then
     echo "       Use --no-hooks to install files into a subdirectory." >&2
     exit 2
   fi
+fi
+
+# Keep one exclusive lock on the target directory for the full installer run.
+# The helper execs this script with the locked directory descriptor inherited;
+# SIGKILL closes it automatically and does not leave a lock file behind.
+if [[ -n "${SELF_EVOLUTION_FLYWHEEL_LOCK_FD:-}" ]]; then
+  python3 "$TRANSACTION_HELPER" verify-lock "$TARGET_DIR" "$SELF_EVOLUTION_FLYWHEEL_LOCK_FD" || exit $?
+else
+  exec python3 "$TRANSACTION_HELPER" lock-exec "$TARGET_DIR" "$(command -v bash)" "$SOURCE_DIR/install.sh" "${ORIGINAL_ARGS[@]}"
+fi
+
+# Recover only a provider staging hard link that can be tied to this installer's
+# exact generated settings inode, owner, contents and two-link publish boundary.
+if [[ "$INSTALL_HOOKS" == 1 ]]; then
+  python3 "$TRANSACTION_HELPER" recover-hook-staging "$TARGET_DIR" codex
+  python3 "$TRANSACTION_HELPER" recover-hook-staging "$TARGET_DIR" claude
 fi
 
 files=(

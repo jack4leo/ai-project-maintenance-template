@@ -336,7 +336,10 @@ def new_temp(parent_fd, name, data, values):
 
 
 def source_file(path):
-    fd = os.open(path, os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | NOFOLLOW)
+    fd = os.open(
+        path,
+        os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NONBLOCK", 0) | NOFOLLOW,
+    )
     try:
         info = os.fstat(fd)
         if not stat.S_ISREG(info.st_mode):
@@ -353,6 +356,50 @@ def source_file(path):
         return data, values
     finally:
         os.close(fd)
+
+
+def compare_command(root, relative, source):
+    """Compare regular files through pinned descriptors without FIFO blocking."""
+    source_fd = None
+    root_fd = open_root(root)
+    parent_fd = None
+    destination_fd = None
+    try:
+        source_fd = os.open(
+            source,
+            os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NONBLOCK", 0) | NOFOLLOW,
+        )
+        source_info = os.fstat(source_fd)
+        if not stat.S_ISREG(source_info.st_mode):
+            raise InstallError(f"source is not a regular file: {source}")
+        parent_fd, name = open_parent(root_fd, relative, False, {"created_directories": []}, "")
+        destination_fd = open_existing(parent_fd, name, reject_hardlinks=False)
+        if destination_fd is None:
+            return 1
+        destination_info = os.fstat(destination_fd)
+        if not stat.S_ISREG(destination_info.st_mode):
+            raise InstallError(f"destination is not a regular file: {relative}")
+        os.lseek(source_fd, 0, os.SEEK_SET)
+        os.lseek(destination_fd, 0, os.SEEK_SET)
+        while True:
+            source_chunk = os.read(source_fd, 1024 * 1024)
+            destination_chunk = os.read(destination_fd, 1024 * 1024)
+            if source_chunk != destination_chunk:
+                return 1
+            if not source_chunk:
+                break
+        if (os.fstat(source_fd).st_size != source_info.st_size or
+                os.fstat(destination_fd).st_size != destination_info.st_size):
+            raise InstallError(f"file changed while being compared: {relative}")
+        return 0
+    finally:
+        if destination_fd is not None:
+            os.close(destination_fd)
+        if parent_fd is not None:
+            os.close(parent_fd)
+        os.close(root_fd)
+        if source_fd is not None:
+            os.close(source_fd)
 
 
 def path_exists(parent_fd, name):
@@ -846,6 +893,8 @@ def main(argv):
             save_state(argv[2], {"operations": [], "created_directories": []})
         elif command == "snapshot" and len(argv) == 4:
             snapshot_command(argv[1], argv[2], argv[3])
+        elif command == "compare" and len(argv) == 4:
+            return compare_command(argv[1], argv[2], argv[3])
         elif command == "copy" and len(argv) == 5:
             op_copy(argv[1], argv[2], argv[3], argv[4])
         elif command == "merge-hook" and len(argv) == 5:

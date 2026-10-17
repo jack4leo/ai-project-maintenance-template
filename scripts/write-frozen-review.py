@@ -26,6 +26,9 @@ LESSON_END = re.compile(rb"^<!-- /frozen-review-lessons: (sha256:[0-9a-f]{64}) -
 RANGE_KEY = re.compile(r"^sha256:[0-9a-f]{64}$")
 OBJECT_ID = re.compile(r"^[0-9a-f]+$")
 LOCK_NAME = "frozen-review-writer.lock"
+POLICY_PATH = "docs/automation/range-exclusions.json"
+RULE_ID = re.compile(r"^[a-z0-9][a-z0-9-]*$")
+SHA256_HEX = re.compile(r"^[0-9a-f]{64}$")
 
 
 class WriterError(Exception):
@@ -60,6 +63,159 @@ def _reject_float(_: str) -> None:
 
 def _reject_constant(_: str) -> None:
     raise WriterError("manifest contains a non-finite JSON number")
+
+
+def _is_object_id(value: Any, length: int) -> bool:
+    return isinstance(value, str) and len(value) == length and OBJECT_ID.fullmatch(value) is not None
+
+
+def _valid_policy_glob(pattern: str) -> bool:
+    if not pattern or pattern.startswith("/") or pattern.endswith("/") or "\\" in pattern:
+        return False
+    parts = pattern.split("/")
+    return not any(
+        part in {"", ".", ".."} or ("**" in part and part != "**")
+        for part in parts
+    )
+
+
+def validate_manifest_nested(value: dict[str, Any], oid_length: int) -> None:
+    commits = value["commits"]
+    if not isinstance(commits, list):
+        raise WriterError("manifest commits must be an array")
+    seen_commits: set[str] = set()
+    for item in commits:
+        if not isinstance(item, dict) or set(item) != {"sha", "tree", "parents"}:
+            raise WriterError("manifest contains a malformed commit record")
+        if not _is_object_id(item["sha"], oid_length) or not _is_object_id(item["tree"], oid_length):
+            raise WriterError("manifest commit records must contain full lowercase object IDs")
+        if item["sha"] in seen_commits:
+            raise WriterError("manifest contains a duplicate commit record")
+        seen_commits.add(item["sha"])
+        parents = item["parents"]
+        if not isinstance(parents, list) or any(not _is_object_id(parent, oid_length) for parent in parents):
+            raise WriterError("manifest commit parents must be full lowercase object IDs")
+        if len(set(parents)) != len(parents):
+            raise WriterError("manifest commit record contains duplicate parents")
+
+    policy = value["exclusion_policy"]
+    policy_fields = {
+        "source_path",
+        "source_commit",
+        "source_blob",
+        "source_sha256",
+        "policy_version",
+        "rules",
+    }
+    if not isinstance(policy, dict) or set(policy) != policy_fields:
+        raise WriterError("manifest exclusion policy has unexpected or missing fields")
+    if policy["source_path"] != POLICY_PATH:
+        raise WriterError("manifest exclusion policy source path is invalid")
+    if type(policy["policy_version"]) is not int or policy["policy_version"] != 1:
+        raise WriterError("manifest exclusion policy version is unsupported")
+    if not _is_object_id(policy["source_commit"], oid_length) or not _is_object_id(policy["source_blob"], oid_length):
+        raise WriterError("manifest exclusion policy source IDs are malformed")
+    if policy["source_commit"] != value["through"]:
+        raise WriterError("manifest exclusion policy source commit must equal through")
+    if not isinstance(policy["source_sha256"], str) or not SHA256_HEX.fullmatch(policy["source_sha256"]):
+        raise WriterError("manifest exclusion policy source digest is malformed")
+    rules = policy["rules"]
+    if not isinstance(rules, list):
+        raise WriterError("manifest exclusion policy rules must be an array")
+    rules_by_id: dict[str, dict[str, Any]] = {}
+    for rule in rules:
+        if not isinstance(rule, dict):
+            raise WriterError("manifest exclusion policy rule must be an object")
+        kind = rule.get("kind")
+        if not isinstance(kind, str) or kind not in {"path-glob", "binary-nul-byte", "gitlink"}:
+            raise WriterError("manifest exclusion policy rule has an unknown kind")
+        expected = {"id", "kind", "patterns", "reason"} if kind == "path-glob" else {"id", "kind", "reason"}
+        if set(rule) != expected:
+            raise WriterError("manifest exclusion policy rule has unexpected or missing fields")
+        rule_id, reason = rule["id"], rule["reason"]
+        if not isinstance(rule_id, str) or not RULE_ID.fullmatch(rule_id) or rule_id in rules_by_id:
+            raise WriterError("manifest exclusion policy contains an invalid or duplicate rule ID")
+        if not isinstance(reason, str) or not reason.strip():
+            raise WriterError("manifest exclusion policy rule needs a non-empty reason")
+        if kind == "path-glob":
+            patterns = rule["patterns"]
+            if (
+                not isinstance(patterns, list)
+                or not patterns
+                or any(not isinstance(pattern, str) or not _valid_policy_glob(pattern) for pattern in patterns)
+                or len(set(patterns)) != len(patterns)
+            ):
+                raise WriterError("manifest exclusion policy path-glob patterns are malformed")
+        rules_by_id[rule_id] = rule
+
+    excluded_paths = value["excluded_paths"]
+    excluded_fields = {
+        "commit",
+        "parent",
+        "path",
+        "status",
+        "old_mode",
+        "new_mode",
+        "old_oid",
+        "new_oid",
+        "rule_id",
+        "match",
+        "reason",
+    }
+    valid_modes = {"000000", "100644", "100755", "120000", "160000"}
+    valid_statuses = {"A", "M", "D", "T", "U", "X", "B"}
+    if not isinstance(excluded_paths, list):
+        raise WriterError("manifest excluded_paths must be an array")
+    for record in excluded_paths:
+        if not isinstance(record, dict) or set(record) != excluded_fields:
+            raise WriterError("manifest contains a malformed excluded-path record")
+        if not _is_object_id(record["commit"], oid_length):
+            raise WriterError("excluded-path commit must be a full lowercase object ID")
+        parent = record["parent"]
+        if parent is not None and not _is_object_id(parent, oid_length):
+            raise WriterError("excluded-path parent must be null or a full lowercase object ID")
+        path = record["path"]
+        if (
+            not isinstance(path, str)
+            or not path
+            or "\x00" in path
+            or path.startswith("/")
+            or any(part in {"", ".", ".."} for part in path.split("/"))
+        ):
+            raise WriterError("excluded-path path is not a canonical repository-relative path")
+        if not isinstance(record["status"], str) or record["status"] not in valid_statuses:
+            raise WriterError("excluded-path status is invalid")
+        if (
+            not isinstance(record["old_mode"], str)
+            or record["old_mode"] not in valid_modes
+            or not isinstance(record["new_mode"], str)
+            or record["new_mode"] not in valid_modes
+        ):
+            raise WriterError("excluded-path file mode is invalid")
+        for field in ("old_oid", "new_oid"):
+            oid = record[field]
+            if oid is not None and not _is_object_id(oid, oid_length):
+                raise WriterError(f"excluded-path {field} must be null or a full lowercase object ID")
+        rule_id = record["rule_id"]
+        rule = rules_by_id.get(rule_id) if isinstance(rule_id, str) else None
+        if rule is None or not isinstance(record["reason"], str) or record["reason"] != rule["reason"]:
+            raise WriterError("excluded-path record does not match an exclusion policy rule")
+        match = record["match"]
+        if not isinstance(match, dict) or len(match) != 1:
+            raise WriterError("excluded-path match must contain exactly one classification")
+        if set(match) == {"pattern"}:
+            if rule["kind"] != "path-glob" or match["pattern"] not in rule["patterns"]:
+                raise WriterError("excluded-path pattern does not match its policy rule")
+        elif set(match) == {"classification"}:
+            classification = match["classification"]
+            if (
+                not isinstance(classification, str)
+                or classification not in {"gitlink", "binary-nul-byte"}
+                or rule["kind"] != classification
+            ):
+                raise WriterError("excluded-path classification does not match its policy rule")
+        else:
+            raise WriterError("excluded-path match has an unknown field")
 
 
 def load_manifest(path: Path) -> dict[str, Any]:
@@ -102,21 +258,7 @@ def load_manifest(path: Path) -> dict[str, Any]:
         raise WriterError("manifest boundaries must use one supported full object-ID length")
     if not OBJECT_ID.fullmatch(from_sha) or not OBJECT_ID.fullmatch(through):
         raise WriterError("manifest boundaries must be lowercase full hexadecimal object IDs")
-    if not isinstance(value["commits"], list):
-        raise WriterError("manifest commits must be an array")
-    for item in value["commits"]:
-        if not isinstance(item, dict) or not isinstance(item.get("parents"), list):
-            raise WriterError("manifest contains a malformed commit record")
-        ids = [item.get("sha"), item.get("tree"), *item["parents"]]
-        if any(
-            not isinstance(oid, str)
-            or len(oid) != len(from_sha)
-            or not OBJECT_ID.fullmatch(oid)
-            for oid in ids
-        ):
-            raise WriterError("manifest commit records must contain full lowercase object IDs")
-    if not isinstance(value["exclusion_policy"], dict) or not isinstance(value["excluded_paths"], list):
-        raise WriterError("manifest exclusion policy or paths are malformed")
+    validate_manifest_nested(value, len(from_sha))
     key = value["range_key"]
     if not isinstance(key, str) or not RANGE_KEY.fullmatch(key):
         raise WriterError("manifest range_key is malformed")
@@ -291,6 +433,19 @@ def _cleanup_owned_temp(directory_fd: int, name: str, identity: tuple[int, int] 
             pass
 
 
+def verify_staged_temp_at(directory_fd: int, name: str, identity: tuple[int, int]) -> None:
+    try:
+        info = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+    except OSError as exc:
+        raise WriterError(f"staged writer path changed before publication: {exc}") from exc
+    if (
+        not stat.S_ISREG(info.st_mode)
+        or info.st_nlink != 1
+        or (info.st_dev, info.st_ino) != identity
+    ):
+        raise WriterError("staged writer path no longer names this transaction's private inode")
+
+
 def atomic_write_at(
     directory_fd: int,
     name: str,
@@ -329,10 +484,15 @@ def atomic_write_at(
         current_bytes, current_identity, _ = read_file_at(directory_fd, name, description)
         if current_bytes != old_bytes or current_identity != old_identity:
             raise WriterError(f"{description} changed during the writer transaction; refusing to replace it")
+        if temp_identity is None:
+            raise WriterError("staged writer inode identity was not recorded")
+        verify_staged_temp_at(directory_fd, temp_name, temp_identity)
         os.replace(temp_name, name, src_dir_fd=directory_fd, dst_dir_fd=directory_fd)
         published = True
         os.fsync(directory_fd)
-        actual, _, _ = read_file_at(directory_fd, name, description)
+        actual, actual_identity, _ = read_file_at(directory_fd, name, description)
+        if actual_identity is None or actual_identity[:2] != temp_identity:
+            raise WriterError(f"published {description} does not have the staged transaction inode")
         if actual != content:
             raise WriterError(f"{description} failed post-write verification")
     except OSError as exc:
@@ -361,6 +521,22 @@ def marker_value(lessons: bytes) -> tuple[str, int, int]:
     if len(value) not in (40, 64) or not OBJECT_ID.fullmatch(value):
         raise WriterError("reviewed-through must be a full lowercase hexadecimal object ID")
     return value, match.start(1), match.end(1)
+
+
+def lesson_section_markers(lines: list[bytes], name: str) -> tuple[int, int | None]:
+    legacy_marker = f"<!-- {name} -->".encode("ascii")
+    start_marker = f"<!-- {name}:START -->".encode("ascii")
+    end_marker = f"<!-- {name}:END -->".encode("ascii")
+    legacy = [i for i, line in enumerate(lines) if line.rstrip(b"\r\n") == legacy_marker]
+    starts = [i for i, line in enumerate(lines) if line.rstrip(b"\r\n") == start_marker]
+    ends = [i for i, line in enumerate(lines) if line.rstrip(b"\r\n") == end_marker]
+    if legacy:
+        if len(legacy) != 1 or starts or ends:
+            raise WriterError(f"LESSONS.md has duplicate or mixed {name} marker formats")
+        return legacy[0], None
+    if len(starts) != 1 or len(ends) != 1 or starts[0] >= ends[0]:
+        raise WriterError(f"LESSONS.md must contain one ordered {name}:START and {name}:END pair")
+    return starts[0], ends[0]
 
 
 def replace_or_append_block(document: bytes, key: str, body: bytes, start_re: re.Pattern[bytes], end_re: re.Pattern[bytes], start_line: bytes, end_line: bytes, insertion_point: int | None = None) -> bytes:
@@ -432,16 +608,20 @@ def update_lessons(document: bytes, manifest: dict[str, Any], body: bytes) -> by
         body = f"<!-- no lesson entries for range {key}; a retry may fill this block -->".encode("ascii")
 
     lines = document.splitlines(keepends=True)
-    active_markers = [i for i, line in enumerate(lines) if line.rstrip(b"\r\n") == b"<!-- ACTIVE_LESSONS -->"]
-    promoted_markers = [i for i, line in enumerate(lines) if line.rstrip(b"\r\n") == b"<!-- PROMOTED_LESSONS -->"]
-    if len(active_markers) != 1 or len(promoted_markers) != 1 or active_markers[0] >= promoted_markers[0]:
-        raise WriterError("LESSONS.md must contain one ordered ACTIVE_LESSONS and PROMOTED_LESSONS anchor")
-    active, promoted = active_markers[0], promoted_markers[0]
-    section = b"".join(lines[active + 1 : promoted])
+    active, active_end = lesson_section_markers(lines, "ACTIVE_LESSONS")
+    promoted, promoted_end = lesson_section_markers(lines, "PROMOTED_LESSONS")
+    if (active_end is None) != (promoted_end is None):
+        raise WriterError("LESSONS.md must not mix legacy and paired section markers")
+    if active >= promoted or (active_end is not None and active_end >= promoted):
+        raise WriterError("LESSONS.md must keep ACTIVE_LESSONS before PROMOTED_LESSONS")
+    section_end = active_end if active_end is not None else promoted
+    if section_end < active + 1:
+        raise WriterError("LESSONS.md has an invalid ACTIVE_LESSONS section")
+    section = b"".join(lines[active + 1 : section_end])
     updated_section = replace_or_append_block(section, key, body, LESSON_START, LESSON_END, start, end, insertion_point=None)
     # In the Lessons file, append new range blocks at the end of the active section.
     # Existing keys are replaced in place by the block updater.
-    document = b"".join(lines[: active + 1]) + updated_section + b"".join(lines[promoted:])
+    document = b"".join(lines[: active + 1]) + updated_section + b"".join(lines[section_end:])
     current_marker, _, _ = marker_value(document)
     if current_marker != marker:
         raise WriterError("Lessons updater unexpectedly changed reviewed-through")

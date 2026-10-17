@@ -1019,5 +1019,6 @@ grep -Fq 'Cloning Self-Evolution Flywheel source' "$TMP_DIR/remote.log" \
 python3 "$REPO_ROOT/tests/test-installer-races.py"
 python3 "$REPO_ROOT/tests/test-installer-recovery.py"
 python3 "$REPO_ROOT/tests/test-installer-security.py"
+PYTHONDONTWRITEBYTECODE=1 python3 "$REPO_ROOT/tests/test-range-freezer.py"
 
-echo "PASS: installer safety, hook and session-start regression tests"
+echo "PASS: installer safety, hook, session-start and read-only range-freezer regression tests"

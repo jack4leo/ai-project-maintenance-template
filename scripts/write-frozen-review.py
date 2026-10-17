@@ -767,6 +767,24 @@ def remove_promoted_from_active(section: bytes, promoted_ids: set[str]) -> tuple
     return b"".join(lines), counts
 
 
+def validate_global_lesson_uniqueness(active_section: bytes, promoted_section: bytes) -> None:
+    """Reject duplicate IDs across the authoritative bounded Lessons sections."""
+    locations: dict[str, str] = {}
+    for section_name, section in (("active", active_section), ("promoted", promoted_section)):
+        start_re, end_re = (LESSON_START, LESSON_END) if section_name == "active" else (
+            PROMOTED_LESSON_START,
+            PROMOTED_LESSON_END,
+        )
+        lines, blocks = range_block_spans(section, start_re, end_re)
+        for block_start, block_end, _key in blocks:
+            block_body = b"".join(lines[block_start + 1 : block_end])
+            for lesson_id in lesson_ids_in_content(block_body, f"{section_name} Lessons"):
+                previous = locations.get(lesson_id)
+                if previous is not None:
+                    raise WriterError(f"duplicate Lesson ID {lesson_id} across {previous} and {section_name} Lessons")
+                locations[lesson_id] = f"{section_name} Lessons"
+
+
 def update_promoted_standards(document: bytes, key: str, body: bytes) -> bytes:
     lines = document.splitlines(keepends=True)
     start_marker = b"<!-- PROMOTED_RULES:START -->"
@@ -909,6 +927,7 @@ def update_lessons(
         active_start,
         active_end_line,
     )
+    validate_global_lesson_uniqueness(active_section, promoted_section)
     document = _replace_lesson_section_content(document, "ACTIVE_LESSONS", active_section)
     current_marker, _, _ = marker_value(document)
     if current_marker != marker:

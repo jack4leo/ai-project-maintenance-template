@@ -655,7 +655,7 @@ grep -Fq 'bootstrap reminder' "$TMP_DIR/session-unmarked.log" \
   || fail "session-start did not emit a bootstrap reminder for an unmarked project"
 grep -Fq 'must not preempt or interrupt' "$TMP_DIR/session-unmarked.log" \
   || fail "session-start reminder could preempt the user's task"
-grep -Fq './install.sh --bootstrap codex' "$TMP_DIR/session-unmarked.log" \
+grep -Fq './.agent-maintenance/flywheel-install.sh --bootstrap codex' "$TMP_DIR/session-unmarked.log" \
   || fail "session-start did not point to explicit bootstrap"
 [[ ! -e "$session_target/.agent-maintenance/bootstrap-complete" ]] \
   || fail "session-start created a completion marker"
@@ -1031,10 +1031,44 @@ python3 - "$TMP_DIR/missing-prompt.stdout" "$TMP_DIR/missing-prompt.stderr" <<'P
 import sys
 from pathlib import Path
 stdout, stderr = (Path(path).read_bytes() for path in sys.argv[1:])
-expected = b"Self-Evolution Flywheel: prompts/bootstrap-project.md is missing; bootstrap cannot run. This hook did not perform bootstrap; restore the prompt before using ./install.sh --bootstrap codex|claude.\n"
+expected = b"Self-Evolution Flywheel: prompts/bootstrap-project.md is missing; bootstrap cannot run. This hook did not perform bootstrap; restore the prompt before using ./.agent-maintenance/flywheel-install.sh --bootstrap codex|claude.\n"
 assert stderr == expected, f"unexpected missing-prompt stderr: {stderr!r}"
 assert stdout == b"", f"missing-prompt diagnostic was written to stdout: {stdout!r}"
 PY
+
+# F1: an existing project installer is preserved, while the template gets a
+# distinct executable entry and every bootstrap instruction names that entry.
+entry_conflict_target="$TMP_DIR/entry-conflict-target"
+mkdir -p "$entry_conflict_target"
+printf '#!/usr/bin/env bash\necho PROJECT_INSTALLER_NOT_FLYWHEEL\n' > "$entry_conflict_target/install.sh"
+chmod +x "$entry_conflict_target/install.sh"
+bash "$REPO_ROOT/install.sh" --target "$entry_conflict_target" --no-hooks \
+  > "$TMP_DIR/entry-conflict.log" 2>&1
+grep -Fq 'PRESERVED existing file (not overwritten): install.sh' "$TMP_DIR/entry-conflict.log" \
+  || fail "business install.sh was not preserved"
+grep -Fq './.agent-maintenance/flywheel-install.sh --bootstrap codex' "$TMP_DIR/entry-conflict.log" \
+  || fail "completion output named the ambiguous business installer"
+[[ -x "$entry_conflict_target/.agent-maintenance/flywheel-install.sh" ]] \
+  || fail "dedicated template installer entry was not executable"
+grep -Fq 'flywheel-install.sh --bootstrap codex' "$entry_conflict_target/.agent-maintenance/session-start.sh" \
+  || fail "startup hook named the ambiguous business installer"
+if "$entry_conflict_target/install.sh" --bootstrap codex 2>/dev/null | grep -Fq PROJECT_INSTALLER_NOT_FLYWHEEL; then
+  : # proves the business file remains independently owned; the hook never points here.
+else
+  fail "business installer fixture was unexpectedly changed"
+fi
+
+# F2: lstat rejects a FIFO before any template publication; installation must
+# finish promptly rather than entering cmp and blocking on the pipe.
+fifo_target="$TMP_DIR/fifo-target"
+mkdir -p "$fifo_target"
+mkfifo "$fifo_target/CLAUDE.md"
+fifo_status=0
+timeout 10 bash "$REPO_ROOT/install.sh" --target "$fifo_target" --no-hooks \
+  > "$TMP_DIR/fifo.log" 2>&1 || fifo_status=$?
+[[ "$fifo_status" -eq 3 ]] || fail "FIFO target was not rejected cleanly: $fifo_status"
+grep -Fq 'not a regular file' "$TMP_DIR/fifo.log" || fail "FIFO rejection was not reported"
+[[ ! -e "$fifo_target/AGENTS.md" ]] || fail "FIFO preflight published files before rejection"
 
 # A script streamed through stdin has no BASH_SOURCE path. Simulate git clone
 # returning one complete checkout and verify the pipe shim delegates to its installer.

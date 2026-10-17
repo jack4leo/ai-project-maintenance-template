@@ -4,7 +4,7 @@ This template repository is named **self-evolution-flywheel**. The installer cop
 
 ## Usage
 
-A copy created with GitHub **Use this template** already contains the documentation, prompts, and project-level hook configuration. To install into an existing repository, or to perform an idempotent configuration check/repair, run this from the target repository root:
+A copy created with GitHub **Use this template** already contains the documentation, prompts, and project-level hook configuration. To install into an existing repository, or to perform an idempotent configuration check/repair, run the template checkout's `./install.sh` from the target repository root:
 
 ```bash
 ./install.sh
@@ -26,7 +26,7 @@ To start Codex Bootstrap immediately after installation (rather than only instal
 curl -fsSL https://raw.githubusercontent.com/jack4leo/self-evolution-flywheel/main/install.sh | bash -s -- --bootstrap codex
 ```
 
-Without `--bootstrap`, no agent is started and no project source is modified automatically. A subsequent startup hook only gives a reminder; it does not tell the agent to interrupt the user's task or fill in project documentation. Start initialization explicitly with the local installer as described below. The target directory must already exist, and when hooks are enabled it must be the root of a Git repository.
+Without `--bootstrap`, no agent is started and no project source is modified automatically. A subsequent startup hook only gives a reminder; it does not tell the agent to interrupt the user's task or fill in project documentation. Start initialization explicitly with the local installer as described below. The target directory must already exist, and when hooks are enabled it must be the root of a Git repository. The installer also publishes the template entry as `./.agent-maintenance/flywheel-install.sh`; use that path for later bootstrap or repair runs in the target. The target's existing `./install.sh`, if any, is preserved as a business/project file and is never used as the template entry.
 
 If the template repository is cloned separately into another directory:
 
@@ -37,9 +37,9 @@ If the template repository is cloned separately into another directory:
 To explicitly start initialization now:
 
 ```bash
-./install.sh --bootstrap codex
+./.agent-maintenance/flywheel-install.sh --bootstrap codex
 # or
-./install.sh --bootstrap claude
+./.agent-maintenance/flywheel-install.sh --bootstrap claude
 ```
 
 `--bootstrap codex` uses `codex exec --sandbox workspace-write -` to read and execute `prompts/bootstrap-project.md`; `--bootstrap claude` uses that file as the first prompt in a Claude Code interactive session. The CLI must be installed, logged in, and callable from `PATH`. Codex's write scope is restricted to the workspace by the `workspace-write` sandbox; other permissions continue to follow the CLI's own configuration.

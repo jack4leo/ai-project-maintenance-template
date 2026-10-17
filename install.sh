@@ -41,7 +41,15 @@ Options:
 USAGE
 }
 
-SOURCE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+INSTALLER_PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)/$(basename "${BASH_SOURCE[0]}")"
+SCRIPT_DIR="$(dirname "$INSTALLER_PATH")"
+# Installed copies use a dedicated entry so a target project's own install.sh
+# is never mistaken for this template installer.
+if [[ "$(basename "${BASH_SOURCE[0]}")" == "flywheel-install.sh" ]]; then
+  SOURCE_DIR="$(cd "$SCRIPT_DIR/.." && pwd -P)"
+else
+  SOURCE_DIR="$SCRIPT_DIR"
+fi
 ORIGINAL_ARGS=("$@")
 TARGET_DIR="$PWD"
 TRANSACTION_HELPER="$SOURCE_DIR/.agent-maintenance/installer-transaction.py"
@@ -117,7 +125,7 @@ fi
 if [[ -n "${SELF_EVOLUTION_FLYWHEEL_LOCK_FD:-}" ]]; then
   python3 "$TRANSACTION_HELPER" verify-lock "$TARGET_DIR" "$SELF_EVOLUTION_FLYWHEEL_LOCK_FD" || exit $?
 else
-  exec python3 "$TRANSACTION_HELPER" lock-exec "$TARGET_DIR" "$(command -v bash)" "$SOURCE_DIR/install.sh" "${ORIGINAL_ARGS[@]}"
+  exec python3 "$TRANSACTION_HELPER" lock-exec "$TARGET_DIR" "$(command -v bash)" "$INSTALLER_PATH" "${ORIGINAL_ARGS[@]}"
 fi
 
 # Recover only a provider staging hard link that can be tied to this installer's
@@ -176,6 +184,25 @@ validate_destination_parents() {
 for relative_path in "${files[@]}"; do
   validate_destination_parents "$relative_path" || exit 3
 done
+# Never run cmp/open against an arbitrary pre-existing target path. lstat all
+# ordinary destinations before the first publication; special files and links
+# are rejected without following them, preserving the target and avoiding FIFO
+# or device blocking. Provider settings have their stricter preflight below.
+python3 - "$TARGET_DIR" "${files[@]}" <<'PY'
+import os
+import stat
+import sys
+root, *relative_files = sys.argv[1:]
+for relative in relative_files:
+    path = os.path.join(root, relative)
+    try:
+        info = os.lstat(path)
+    except FileNotFoundError:
+        continue
+    if not stat.S_ISREG(info.st_mode):
+        print(f"ERROR: existing target path is not a regular file (preserved): {relative}", file=sys.stderr)
+        sys.exit(3)
+PY
 if [[ "$INSTALL_HOOKS" == 1 ]]; then
   validate_destination_parents ".codex/hooks.json" || exit 3
   validate_destination_parents ".claude/settings.json" || exit 3
@@ -742,6 +769,26 @@ for relative_path in "${files[@]}"; do
   [[ "$relative_path" == "prompts/bootstrap-project.md" ]] && prompt_ready=1
 done
 
+# Keep the template installer available even when the target already owns
+# install.sh. This copy is intentionally a separate entry point.
+template_entry="$TARGET_DIR/.agent-maintenance/flywheel-install.sh"
+if [[ -e "$template_entry" || -L "$template_entry" ]]; then
+  if [[ -L "$template_entry" || ! -f "$template_entry" ]]; then
+    echo "ERROR: existing template installer entry is not a regular file: .agent-maintenance/flywheel-install.sh" >&2
+    exit 3
+  fi
+  if cmp -s "$SOURCE_DIR/install.sh" "$template_entry"; then
+    echo "UNCHANGED .agent-maintenance/flywheel-install.sh"
+  else
+    echo "PRESERVED existing file (not overwritten): .agent-maintenance/flywheel-install.sh"
+    conflicts+=(".agent-maintenance/flywheel-install.sh")
+  fi
+else
+  python3 "$TRANSACTION_HELPER" copy "$TARGET_DIR" ".agent-maintenance/flywheel-install.sh" "$SOURCE_DIR/install.sh" "$transaction_state" >/dev/null
+  chmod --reference="$SOURCE_DIR/install.sh" "$template_entry"
+  echo "INSTALLED .agent-maintenance/flywheel-install.sh"
+fi
+
 merge_hook_config() {
   local provider="$1"
   local settings_path="$2"
@@ -835,4 +882,4 @@ fi
 
 echo
 echo "Installation complete for: $TARGET_DIR"
-echo "To initialize now: ./install.sh --bootstrap codex  OR  ./install.sh --bootstrap claude"
+echo "To initialize now: ./.agent-maintenance/flywheel-install.sh --bootstrap codex  OR  ./.agent-maintenance/flywheel-install.sh --bootstrap claude"

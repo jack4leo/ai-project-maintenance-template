@@ -60,7 +60,7 @@ The following bounded block is the authoritative location for project-specific s
 <!-- PROMOTED_RULES:START -->
 <!-- PROMOTED_RULES:END -->
 
-No project-specific stable rule is currently promoted.
+If the block is empty, no project-specific stable rule is currently promoted.
 
 Each rule in the block above uses this format:
 

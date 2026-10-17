@@ -18,6 +18,7 @@ from unittest import mock
 REPO_ROOT = Path(__file__).resolve().parents[1]
 WRITER_PATH = REPO_ROOT / "scripts" / "write-frozen-review.py"
 FREEZER_PATH = REPO_ROOT / "scripts" / "freeze-review-range.py"
+PROMOTION_VALIDATOR_PATH = REPO_ROOT / "scripts" / "validate_lesson_promotions.py"
 sys.dont_write_bytecode = True
 WRITER = types.ModuleType("write_frozen_review")
 WRITER.__file__ = str(WRITER_PATH)
@@ -25,6 +26,13 @@ exec(compile(WRITER_PATH.read_text(encoding="utf-8"), str(WRITER_PATH), "exec"),
 FREEZER = types.ModuleType("freeze_review_range")
 FREEZER.__file__ = str(FREEZER_PATH)
 exec(compile(FREEZER_PATH.read_text(encoding="utf-8"), str(FREEZER_PATH), "exec"), FREEZER.__dict__)
+PROMOTION_VALIDATOR = types.ModuleType("validate_lesson_promotions")
+PROMOTION_VALIDATOR.__file__ = str(PROMOTION_VALIDATOR_PATH)
+sys.modules[PROMOTION_VALIDATOR.__name__] = PROMOTION_VALIDATOR
+exec(
+    compile(PROMOTION_VALIDATOR_PATH.read_text(encoding="utf-8"), str(PROMOTION_VALIDATOR_PATH), "exec"),
+    PROMOTION_VALIDATOR.__dict__,
+)
 
 
 FROM = "a" * 40
@@ -81,6 +89,30 @@ def write_inputs(folder: Path, manifest: dict[str, object], archive: str, lesson
     return manifest_path, archive_path, lessons_path
 
 
+def promotion_fixture() -> tuple[str, str, str]:
+    active = "\n".join(
+        [
+            "### L-0001 — Preserve review evidence when promoting a stable rule",
+            "- **Why:** synthetic test fixture; no claim about project history.",
+            "- **Review evidence:**",
+            "  - `2026-10-01` — [fixture evidence](https://example.invalid/evidence/2026-10-01)",
+            "  - `2026-10-02` — [fixture evidence](https://example.invalid/evidence/2026-10-02)",
+            "  - `2026-10-03` — [fixture evidence](https://example.invalid/evidence/2026-10-03)",
+            "- **Fix or follow-up:** synthetic fixture.",
+            "- **Status:** active",
+        ]
+    )
+    promoted = active.replace("- **Status:** active", "- **Status:** promoted") + "\n- **Promoted rule:** PS-0001\n- **Promotion date:** 2026-10-17"
+    standard = "\n".join(
+        [
+            "##### PS-0001 — Preserve date-specific promotion evidence",
+            "- **Scope:** synthetic writer regression fixture.",
+            "- **Evidence lessons:** `L-0001`",
+        ]
+    )
+    return active, promoted, standard
+
+
 class FrozenWriterTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory(prefix="range-writer-test-")
@@ -100,11 +132,46 @@ class FrozenWriterTests(unittest.TestCase):
         self.inputs.mkdir()
         self.manifest = make_manifest()
 
-    def run_writer(self, archive_body: str = "Review body", lesson_body: str = "### Rule\n- **Why:** evidence\n- **Evidence:** commit\n- **Fix or follow-up:** done\n- **Seen 1×:** 2026-10-16\n- **Status:** active", archive: str = "docs/reviews/2026-10-16.md") -> dict[str, str]:
+    def run_writer(
+        self,
+        archive_body: str = "Review body",
+        lesson_body: str = "### Rule\n- **Why:** evidence\n- **Evidence:** commit\n- **Fix or follow-up:** done\n- **Seen 1×:** 2026-10-16\n- **Status:** active",
+        archive: str = "docs/reviews/2026-10-16.md",
+        promoted_lesson_body: str | None = None,
+        promoted_standards_body: str | None = None,
+    ) -> dict[str, str]:
         manifest_path, archive_path, lessons_path = write_inputs(
             self.inputs, self.manifest, archive_body, lesson_body
         )
-        return WRITER.write_review(self.repo, manifest_path, archive, archive_path, lessons_path)
+        promoted_lessons_path = None
+        promoted_standards_path = None
+        if promoted_lesson_body is not None:
+            promoted_lessons_path = self.inputs / "promoted-lessons.md"
+            promoted_lessons_path.write_text(promoted_lesson_body, encoding="utf-8")
+        if promoted_standards_body is not None:
+            promoted_standards_path = self.inputs / "promoted-standards.md"
+            promoted_standards_path.write_text(promoted_standards_body, encoding="utf-8")
+        return WRITER.write_review(
+            self.repo,
+            manifest_path,
+            archive,
+            archive_path,
+            lessons_path,
+            promoted_lessons_path,
+            promoted_standards_path,
+        )
+
+    def seed_active_lesson(self, active_body: str) -> str:
+        prior_key = "sha256:" + "d" * 64
+        document = self.lessons.read_text(encoding="utf-8")
+        end_marker = "<!-- ACTIVE_LESSONS:END -->"
+        block = (
+            f"<!-- frozen-review-lessons: {prior_key} -->\n"
+            f"{active_body}\n"
+            f"<!-- /frozen-review-lessons: {prior_key} -->\n"
+        )
+        self.lessons.write_text(document.replace(end_marker, block + end_marker, 1), encoding="utf-8")
+        return prior_key
 
     def test_manifest_format_and_range_key_are_verified_without_recomputing_range(self) -> None:
         result = self.run_writer()
@@ -217,6 +284,212 @@ class FrozenWriterTests(unittest.TestCase):
         self.assertIn("<!-- PROMOTED_LESSONS -->", lessons)
         self.assertIn("Legacy-compatible lesson", lessons)
         self.assertLess(lessons.index("Legacy-compatible lesson"), lessons.index("<!-- PROMOTED_LESSONS -->"))
+
+    def test_promotion_moves_active_lesson_and_upserts_both_history_files_by_range_key(self) -> None:
+        active_body, promoted_body, standard_body = promotion_fixture()
+        prior_key = self.seed_active_lesson(active_body)
+        standards_path = self.repo / "docs/code-standards.md"
+        standards_path.parent.mkdir(parents=True)
+        standards_path.write_text(
+            "# Synthetic standards\n\n<!-- PROMOTED_RULES:START -->\n<!-- PROMOTED_RULES:END -->\n",
+            encoding="utf-8",
+        )
+
+        self.run_writer(
+            "promotion archive",
+            "",
+            promoted_lesson_body=promoted_body,
+            promoted_standards_body=standard_body,
+        )
+        lessons = self.lessons.read_text(encoding="utf-8")
+        active_section = lessons.split("<!-- ACTIVE_LESSONS:START -->", 1)[1].split("<!-- ACTIVE_LESSONS:END -->", 1)[0]
+        promoted_section = lessons.split("<!-- PROMOTED_LESSONS:START -->", 1)[1].split("<!-- PROMOTED_LESSONS:END -->", 1)[0]
+        standards = standards_path.read_text(encoding="utf-8")
+        self.assertIn(prior_key, active_section)
+        self.assertNotIn("L-0001", active_section)
+        self.assertIn("L-0001", promoted_section)
+        self.assertIn(self.manifest["range_key"], promoted_section)
+        self.assertIn("PS-0001", standards)
+        self.assertIn(self.manifest["range_key"], standards)
+        self.assertEqual(PROMOTION_VALIDATOR.validate_documents(lessons, standards), [])
+
+        self.run_writer(
+            "promotion retry",
+            "",
+            promoted_lesson_body=promoted_body,
+            promoted_standards_body=standard_body,
+        )
+        lessons = self.lessons.read_text(encoding="utf-8")
+        standards = standards_path.read_text(encoding="utf-8")
+        self.assertEqual(lessons.count(self.manifest["range_key"]), 5)
+        self.assertEqual(standards.count(self.manifest["range_key"]), 2)
+        self.assertEqual(PROMOTION_VALIDATOR.validate_documents(lessons, standards), [])
+
+    def test_promotion_inputs_are_paired_and_require_an_existing_active_lesson(self) -> None:
+        _active_body, promoted_body, _standard_body = promotion_fixture()
+        manifest_path, archive_path, lessons_path = write_inputs(
+            self.inputs, self.manifest, "review", ""
+        )
+        promoted_path = self.inputs / "promoted-lessons.md"
+        promoted_path.write_text(promoted_body, encoding="utf-8")
+        with self.assertRaisesRegex(WRITER.WriterError, "supplied together"):
+            WRITER.write_review(
+                self.repo,
+                manifest_path,
+                "docs/reviews/2026-10-16.md",
+                archive_path,
+                lessons_path,
+                promoted_path,
+            )
+        self.assertFalse((self.repo / "docs").exists())
+
+        standards_path = self.repo / "docs/code-standards.md"
+        standards_path.parent.mkdir(parents=True)
+        standards_path.write_text("<!-- PROMOTED_RULES:START -->\n<!-- PROMOTED_RULES:END -->\n", encoding="utf-8")
+        standard_path = self.inputs / "promoted-standards.md"
+        standard_path.write_text(promotion_fixture()[2], encoding="utf-8")
+        with self.assertRaisesRegex(WRITER.WriterError, "first exist in active history"):
+            WRITER.write_review(
+                self.repo,
+                manifest_path,
+                "docs/reviews/2026-10-16.md",
+                archive_path,
+                lessons_path,
+                promoted_path,
+                standard_path,
+            )
+        self.assertFalse((self.repo / "docs/reviews/2026-10-16.md").exists())
+        self.assertIn(f"reviewed-through: {FROM}", self.lessons.read_text(encoding="utf-8").splitlines()[0])
+
+    def test_promotion_write_failure_keeps_watermark_and_same_key_retry_completes(self) -> None:
+        active_body, promoted_body, standard_body = promotion_fixture()
+        self.seed_active_lesson(active_body)
+        standards_path = self.repo / "docs/code-standards.md"
+        standards_path.parent.mkdir(parents=True)
+        original_standards = "# Synthetic standards\n<!-- PROMOTED_RULES:START -->\n<!-- PROMOTED_RULES:END -->\n"
+        standards_path.write_text(original_standards, encoding="utf-8")
+        real_write = WRITER.atomic_write_at
+
+        def fail_standards(directory_fd, name, content, description, expected_snapshot=None):
+            if name == "code-standards.md":
+                raise WRITER.WriterError("injected standards write failure")
+            return real_write(directory_fd, name, content, description, expected_snapshot)
+
+        with mock.patch.object(WRITER, "atomic_write_at", side_effect=fail_standards):
+            with self.assertRaisesRegex(WRITER.WriterError, "injected standards"):
+                self.run_writer(
+                    "saved promotion archive",
+                    "",
+                    promoted_lesson_body=promoted_body,
+                    promoted_standards_body=standard_body,
+                )
+        self.assertIn(f"reviewed-through: {FROM}", self.lessons.read_text(encoding="utf-8").splitlines()[0])
+        self.assertIn("L-0001", self.lessons.read_text(encoding="utf-8"))
+        self.assertEqual(standards_path.read_text(encoding="utf-8"), original_standards)
+        self.assertTrue((self.repo / "docs/reviews/2026-10-16.md").exists())
+
+        self.run_writer(
+            "saved promotion archive",
+            "",
+            promoted_lesson_body=promoted_body,
+            promoted_standards_body=standard_body,
+        )
+        self.assertIn(f"reviewed-through: {THROUGH}", self.lessons.read_text(encoding="utf-8").splitlines()[0])
+        self.assertEqual(
+            PROMOTION_VALIDATOR.validate_documents(
+                self.lessons.read_text(encoding="utf-8"),
+                standards_path.read_text(encoding="utf-8"),
+            ),
+            [],
+        )
+
+    def test_promotion_does_not_follow_code_standards_symlink(self) -> None:
+        active_body, promoted_body, standard_body = promotion_fixture()
+        self.seed_active_lesson(active_body)
+        docs = self.repo / "docs"
+        docs.mkdir()
+        outside = self.root / "outside-standards.md"
+        outside.write_text("outside remains unchanged\n", encoding="utf-8")
+        os.symlink(outside, docs / "code-standards.md")
+        with self.assertRaisesRegex(WRITER.WriterError, "without following links"):
+            self.run_writer(
+                "review",
+                "",
+                promoted_lesson_body=promoted_body,
+                promoted_standards_body=standard_body,
+            )
+        self.assertEqual(outside.read_text(encoding="utf-8"), "outside remains unchanged\n")
+        self.assertFalse((self.repo / "docs/reviews/2026-10-16.md").exists())
+
+    def test_duplicate_promotion_marker_outside_standards_block_fails_before_writes(self) -> None:
+        active_body, promoted_body, standard_body = promotion_fixture()
+        self.seed_active_lesson(active_body)
+        standards_path = self.repo / "docs/code-standards.md"
+        standards_path.parent.mkdir(parents=True)
+        key = self.manifest["range_key"]
+        standards_path.write_text(
+            f"<!-- frozen-review-standard: {key} -->\nunscoped duplicate\n"
+            f"<!-- /frozen-review-standard: {key} -->\n"
+            "<!-- PROMOTED_RULES:START -->\n<!-- PROMOTED_RULES:END -->\n",
+            encoding="utf-8",
+        )
+        with self.assertRaisesRegex(WRITER.WriterError, "could not be verified"):
+            self.run_writer(
+                "review",
+                "",
+                promoted_lesson_body=promoted_body,
+                promoted_standards_body=standard_body,
+            )
+        self.assertFalse((self.repo / "docs/reviews/2026-10-16.md").exists())
+        self.assertIn(f"reviewed-through: {FROM}", self.lessons.read_text(encoding="utf-8").splitlines()[0])
+        self.assertIn("unscoped duplicate", standards_path.read_text(encoding="utf-8"))
+
+    def test_promotion_retry_recovers_if_standards_wrote_before_lessons_failure(self) -> None:
+        active_body, promoted_body, standard_body = promotion_fixture()
+        self.seed_active_lesson(active_body)
+        standards_path = self.repo / "docs/code-standards.md"
+        standards_path.parent.mkdir(parents=True)
+        standards_path.write_text(
+            "# Synthetic standards\n<!-- PROMOTED_RULES:START -->\n<!-- PROMOTED_RULES:END -->\n",
+            encoding="utf-8",
+        )
+        real_write = WRITER.atomic_write_at
+
+        def fail_lessons(directory_fd, name, content, description, expected_snapshot=None):
+            if name == "LESSONS.md":
+                raise WRITER.WriterError("injected Lessons write failure")
+            return real_write(directory_fd, name, content, description, expected_snapshot)
+
+        with mock.patch.object(WRITER, "atomic_write_at", side_effect=fail_lessons):
+            with self.assertRaisesRegex(WRITER.WriterError, "injected Lessons"):
+                self.run_writer(
+                    "promotion archive",
+                    "",
+                    promoted_lesson_body=promoted_body,
+                    promoted_standards_body=standard_body,
+                )
+
+        lessons = self.lessons.read_text(encoding="utf-8")
+        standards = standards_path.read_text(encoding="utf-8")
+        active_section = lessons.split("<!-- ACTIVE_LESSONS:START -->", 1)[1].split("<!-- ACTIVE_LESSONS:END -->", 1)[0]
+        self.assertIn("L-0001", active_section)
+        self.assertIn("PS-0001", standards)
+        self.assertIn(f"reviewed-through: {FROM}", lessons.splitlines()[0])
+
+        self.run_writer(
+            "promotion archive",
+            "",
+            promoted_lesson_body=promoted_body,
+            promoted_standards_body=standard_body,
+        )
+        self.assertEqual(
+            PROMOTION_VALIDATOR.validate_documents(
+                self.lessons.read_text(encoding="utf-8"),
+                standards_path.read_text(encoding="utf-8"),
+            ),
+            [],
+        )
+        self.assertIn(f"reviewed-through: {THROUGH}", self.lessons.read_text(encoding="utf-8").splitlines()[0])
 
     def test_same_key_retry_replaces_only_its_blocks_and_preserves_other_ranges(self) -> None:
         review_dir = self.repo / "docs" / "reviews"

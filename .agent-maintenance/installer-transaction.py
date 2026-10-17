@@ -162,9 +162,13 @@ def rename_noreplace(parent_fd, source, destination):
 
 
 def xattrs(fd):
+    listxattr = getattr(os, "listxattr", None)
+    getxattr = getattr(os, "getxattr", None)
+    if not callable(listxattr) or not callable(getxattr):
+        return None
     values = {}
-    for name in os.listxattr(fd):
-        values[name] = base64.b64encode(os.getxattr(fd, name)).decode("ascii")
+    for name in listxattr(fd):
+        values[name] = base64.b64encode(getxattr(fd, name)).decode("ascii")
     return values
 
 
@@ -186,6 +190,7 @@ def identity(fd):
     if after.st_atime_ns != before.st_atime_ns:
         os.utime(fd, ns=(before.st_atime_ns, before.st_mtime_ns))
         after = os.fstat(fd)
+    attributes = xattrs(fd)
     return {
         "device": after.st_dev,
         "inode": after.st_ino,
@@ -195,14 +200,18 @@ def identity(fd):
         "uid": after.st_uid,
         "gid": after.st_gid,
         "sha256": digest.hexdigest(),
-        "xattrs": hashlib.sha256(
-            json.dumps(xattrs(fd), sort_keys=True, separators=(",", ":")).encode("utf-8")
+        "xattrs": None if attributes is None else hashlib.sha256(
+            json.dumps(attributes, sort_keys=True, separators=(",", ":")).encode("utf-8")
         ).hexdigest(),
     }
 
 
 def same_identity(left, right):
-    return bool(left and right) and all(left.get(key) == right.get(key) for key in (
+    # Without xattr inspection, a matching inode/content signature is not
+    # enough evidence to remove a recovery candidate during rollback.
+    if not left or not right or left.get("xattrs") is None or right.get("xattrs") is None:
+        return False
+    return all(left.get(key) == right.get(key) for key in (
         "device", "inode", "size", "mtime_ns", "mode", "uid", "gid", "sha256", "xattrs"
     ))
 
@@ -267,20 +276,32 @@ def apply_metadata(fd, values):
             name: base64.b64decode(value)
             for name, value in values.get("xattrs", {}).items()
         }
-        for name in os.listxattr(fd):
-            if name not in wanted:
-                os.removexattr(fd, name)
-        for name, value in wanted.items():
-            os.setxattr(fd, name, value)
+        listxattr = getattr(os, "listxattr", None)
+        getxattr = getattr(os, "getxattr", None)
+        removexattr = getattr(os, "removexattr", None)
+        setxattr = getattr(os, "setxattr", None)
+        xattr_api = all(callable(function) for function in (listxattr, getxattr, removexattr, setxattr))
+        if xattr_api:
+            for name in listxattr(fd):
+                if name not in wanted:
+                    removexattr(fd, name)
+            for name, value in wanted.items():
+                setxattr(fd, name, value)
+            actual = xattrs(fd)
+        elif wanted:
+            raise NotImplementedError("xattr APIs are unavailable for requested file attributes")
+        else:
+            # A new transaction-owned staging file requests no xattrs; core
+            # mode/owner/time metadata can still be applied safely.
+            actual = None
         os.utime(fd, ns=(values["atime_ns"], values["mtime_ns"]))
         info = os.fstat(fd)
-        actual = xattrs(fd)
         if (
             (info.st_uid, info.st_gid) != (values["uid"], values["gid"])
             or stat.S_IMODE(info.st_mode) != values["mode"]
             or info.st_atime_ns != values["atime_ns"]
             or info.st_mtime_ns != values["mtime_ns"]
-            or actual != values.get("xattrs", {})
+            or (actual is not None and actual != values.get("xattrs", {}))
         ):
             raise OSError("staged file metadata did not match the original")
     except (OSError, AttributeError, NotImplementedError) as exc:

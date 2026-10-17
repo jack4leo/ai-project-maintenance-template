@@ -553,6 +553,29 @@ class FrozenRangeTests(unittest.TestCase):
         self.assertNotEqual(conflict.returncode, 0)
         self.assertEqual(conflict.stdout, b"")
 
+    def test_policy_rejects_isolated_surrogate_before_freeze_serialization(self) -> None:
+        policy = self.temp_path / "surrogate-policy.json"
+        policy.write_bytes(
+            b'{"policy_version":3,"rules":[{"id":"r","kind":"path-prefix",'
+            b'"paths":[],"reason":"bad\\ud800"}]}'
+        )
+        validation = subprocess.run(
+            [sys.executable, str(RUNNER), "--validate-policy", str(policy)],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+        self.assertNotEqual(validation.returncode, 0)
+        self.assertEqual(validation.stdout, b"")
+
+        bad_policy = self.repo / "docs" / "automation" / "range-exclusions.json"
+        bad_policy.write_bytes(policy.read_bytes())
+        commit(self.repo, "add policy with isolated surrogate escape")
+        frozen = invoke(self.repo)
+        self.assertNotEqual(frozen.returncode, 0)
+        self.assertEqual(frozen.stdout, b"")
+        self.assertIn("UTF-8", frozen.stderr.decode("utf-8", errors="replace"))
+
     def test_binary_deletion_checks_old_blob_across_chunk_boundary(self) -> None:
         binary = self.repo / "large.bin"
         binary.write_bytes(b"A" * (64 * 1024) + b"\0" + b"B" * 20)

@@ -310,6 +310,13 @@ def _reject_duplicate_json_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     return result
 
 
+def validate_unicode_text(value: str, where: str) -> None:
+    try:
+        value.encode("utf-8", errors="strict")
+    except UnicodeEncodeError as exc:
+        raise FreezeError(f"{where} is not valid UTF-8") from exc
+
+
 def parse_policy(content: bytes) -> tuple[int, list[dict[str, Any]]]:
     try:
         text = content.decode("utf-8", errors="strict")
@@ -350,11 +357,13 @@ def parse_policy(content: bytes) -> tuple[int, list[dict[str, Any]]]:
         reason = raw_rule["reason"]
         if not isinstance(identifier, str) or not RULE_ID.fullmatch(identifier):
             raise FreezeError(f"{where} has an invalid id")
+        validate_unicode_text(identifier, f"{where} id")
         if identifier in identifiers:
             raise FreezeError(f"duplicate exclusion rule id: {identifier}")
         identifiers.add(identifier)
         if not isinstance(reason, str) or not reason.strip():
             raise FreezeError(f"{where} must state a non-empty reason")
+        validate_unicode_text(reason, f"{where} reason")
 
         normalized: dict[str, Any] = {"id": identifier, "kind": kind}
         if kind == "path-glob":
@@ -363,6 +372,8 @@ def parse_policy(content: bytes) -> tuple[int, list[dict[str, Any]]]:
                 raise FreezeError(f"{where} must have at least one pattern")
             if any(not isinstance(pattern, str) for pattern in patterns):
                 raise FreezeError(f"{where} patterns must be strings")
+            for pattern in patterns:
+                validate_unicode_text(pattern, f"{where} pattern")
             if len(set(patterns)) != len(patterns):
                 raise FreezeError(f"{where} contains duplicate patterns")
             for pattern in patterns:
@@ -372,6 +383,8 @@ def parse_policy(content: bytes) -> tuple[int, list[dict[str, Any]]]:
             paths = raw_rule["paths"]
             if not isinstance(paths, list) or any(not isinstance(path, str) for path in paths):
                 raise FreezeError(f"{where} paths must be an array of literal repository paths")
+            for path in paths:
+                validate_unicode_text(path, f"{where} path")
             if len(set(paths)) != len(paths):
                 raise FreezeError(f"{where} contains duplicate paths")
             for path in paths:
@@ -384,6 +397,7 @@ def parse_policy(content: bytes) -> tuple[int, list[dict[str, Any]]]:
                     producer = raw_rule["producer"]
                     if not isinstance(producer, str) or not producer.strip():
                         raise FreezeError(f"{where} producer must be a non-empty process description")
+                    validate_unicode_text(producer, f"{where} producer")
                     normalized["producer"] = producer
         normalized["reason"] = reason
         rules.append(normalized)

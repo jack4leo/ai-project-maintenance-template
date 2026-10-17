@@ -120,6 +120,37 @@ PY
 grep -Fq 'startup-hook registration is skipped' "$TMP_DIR/existing-config.log" \
   || fail "manual hook merge conflict was not reported"
 
+# Some macOS Python builds do not expose os.listxattr. A valid existing provider
+# conflict must still skip only that hook instead of aborting the full install.
+no_listxattr_bin="$TMP_DIR/no-listxattr-bin"
+mkdir -p "$no_listxattr_bin"
+real_python3="$(command -v python3)"
+cat > "$no_listxattr_bin/python3" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ "${1:-}" == "-" ]]; then
+  shift
+  exec "$SELF_EVOLUTION_REAL_PYTHON3" -c 'import os,sys; hasattr(os,"listxattr") and delattr(os,"listxattr"); exec(compile(sys.stdin.buffer.read(), "<stdin>", "exec"))' "$@"
+fi
+exec "$SELF_EVOLUTION_REAL_PYTHON3" "$@"
+SH
+chmod +x "$no_listxattr_bin/python3"
+no_listxattr_target="$TMP_DIR/no-listxattr-target"
+init_git_target "$no_listxattr_target"
+mkdir -p "$no_listxattr_target/.codex"
+printf '{"hooks":{}}\n' > "$no_listxattr_target/.codex/hooks.json"
+cp "$no_listxattr_target/.codex/hooks.json" "$TMP_DIR/no-listxattr-before.json"
+PATH="$no_listxattr_bin:$PATH" SELF_EVOLUTION_REAL_PYTHON3="$real_python3" \
+  bash "$REPO_ROOT/install.sh" --target "$no_listxattr_target" \
+  > "$TMP_DIR/no-listxattr.log" 2>&1 \
+  || fail "installer aborted when Python lacked os.listxattr"
+cmp -s "$TMP_DIR/no-listxattr-before.json" "$no_listxattr_target/.codex/hooks.json" \
+  || fail "missing os.listxattr fallback changed existing Codex settings"
+[[ -f "$no_listxattr_target/.claude/settings.json" ]] \
+  || fail "missing os.listxattr fallback blocked independent Claude hook registration"
+grep -Fq 'startup-hook registration is skipped' "$TMP_DIR/no-listxattr.log" \
+  || fail "missing os.listxattr fallback did not report the Codex hook conflict"
+
 # Invalid settings in the later provider are rejected before any template or
 # earlier-provider file is written.
 invalid_claude_target="$TMP_DIR/invalid-claude-target"
@@ -938,6 +969,23 @@ bash "$REPO_ROOT/install.sh" --target "$non_git_target" --no-hooks > "$TMP_DIR/n
 clean_target="$TMP_DIR/clean-target"
 init_git_target "$clean_target"
 bash "$REPO_ROOT/install.sh" --target "$clean_target" > "$TMP_DIR/clean.log" 2>&1
+for relative in \
+  scripts/freeze-review-range.py \
+  scripts/write-frozen-review.py \
+  scripts/validate_lesson_promotions.py \
+  .github/workflows/lesson-promotion-gate.yml; do
+  [[ -f "$clean_target/$relative" ]] || fail "installer omitted $relative"
+  cmp -s "$REPO_ROOT/$relative" "$clean_target/$relative" \
+    || fail "installer copied the wrong contents for $relative"
+done
+[[ ! -e "$clean_target/.github/workflows/installer-tests.yml" ]] \
+  || fail "installer copied template-only installer CI without its test suite"
+grep -Fq 'scripts/freeze-review-range.py' "$clean_target/prompts/daily-review.md" \
+  || fail "installed daily-review prompt does not invoke the frozen-range script"
+grep -Fq 'excluded_paths' "$clean_target/prompts/daily-review.md" \
+  || fail "installed daily-review prompt does not require honoring frozen exclusions"
+grep -Fq 'scripts/write-frozen-review.py' "$clean_target/prompts/daily-review.md" \
+  || fail "installed daily-review prompt does not use the frozen-review writer"
 python3 - "$clean_target" <<'PY'
 import json
 import sys

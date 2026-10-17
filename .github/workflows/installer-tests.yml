@@ -17,5 +17,3 @@ jobs:
         run: bash tests/test-install.sh
       - name: Test Lesson promotion validator
         run: python3 tests/test_lesson_promotions.py
-      - name: Validate persisted Lesson promotion evidence
-        run: python3 scripts/validate_lesson_promotions.py

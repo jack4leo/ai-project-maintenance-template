@@ -1,8 +1,16 @@
 # Daily review of project changes
 
-Follow `AGENTS.md` and `docs/automation/runner-contract.md`. Read the sole last-successful `reviewed-through` SHA from the marker at the top of `LESSONS.md`, then review that verified range up to the collected HEAD. Read project profile, Lessons, project code standards, subsystem index and relevant subsystem pages. If the range is incomplete or ambiguous, stop and report the gap without advancing the watermark.
+Follow `AGENTS.md` and `docs/automation/runner-contract.md`. Do not calculate the range from `LESSONS.md` or the current branch yourself. Freeze it first and use only the resulting manifest:
 
-For each commit and its relevant context, look for:
+```bash
+python3 scripts/freeze-review-range.py --repo . > "$TMPDIR/frozen-review-manifest.json"
+```
+
+If freezing fails, the manifest is missing/invalid, or the range cannot be fully inspected, stop and report the gap. Do not guess, initialize, repair, or advance `reviewed-through`; do not replace the frozen `from`, `through`, commit list, or policy with newer repository state. The manifest's `commits` array is the complete commit range. `excluded_paths` records path exclusions; they do not remove their commits from the manifest.
+
+Before reading a patch or file, compare each commit/parent/path with `excluded_paths`. Do not open or review the contents of a path excluded for that comparison. Review the remaining, non-excluded changes in each manifest commit; an excluded path does not exclude other paths in the same commit. Avoid whole-commit patches that would print excluded file contents. Record the excluded paths and their policy reasons in the archive so the omission is explicit. Only exclusions actually present in the frozen manifest apply.
+
+Read project profile, Lessons, project code standards, subsystem index and relevant subsystem pages. For each included commit and its relevant non-excluded context, look for:
 
 1. **Rework:** was the change reverted, corrected, reopened, or did it require another fix? Identify the confirmed defect and evidence.
 2. **Should not have merged/released:** did it violate a documented requirement, introduce a confirmed regression, bypass a required check or exceed authorization? Separate objective impact from reviewer opinion.
@@ -13,8 +21,21 @@ Check later commits and the final current behavior before concluding an earlier 
 
 Identify failing checks that were already present on the main branch or review baseline. Investigate whether each is a real defect when evidence and safe access permit, and record what was checked and the conclusion (or the unresolved owner/action); do not automatically treat a pre-existing red check as proof that the new change passes or fails.
 
-Update `LESSONS.md` with concise, actionable, project-specific rules and evidence. Give each lesson a stable, never-reused `L-0001` ID and add date-specific evidence rows only for completed review dates, with a concrete link for each date. Repeated events or citations on the same date count once. A one-off lesson remains active in Lessons. Only after the same lesson is independently evidenced on at least three different dates, promote it to the stable-rules block in `docs/code-standards.md`, assign a `PS-0001` ID, cite the supporting lesson ID(s), and move the complete lesson record to promotion history without changing its ID or dated evidence. Promotion dates do not count as evidence. Do not use legacy `Seen N×` text or generic evidence fields to meet the threshold; migrate only dates and citations verified from repository evidence, and leave unsupported history unpromoted with the gap stated. A severe single event may justify a clearly labeled temporary protection proposal, not an unapproved permanent policy.
+Prepare concise, actionable, project-specific Lessons entries with evidence. Give each lesson a stable, never-reused `L-0001` ID and add date-specific evidence rows only for completed review dates, with a concrete link for each date. Repeated events or citations on the same date count once. A one-off lesson remains active in Lessons. Only after the same lesson is independently evidenced on at least three different dates, promote it to the stable-rules block in `docs/code-standards.md`, assign a `PS-0001` ID, cite the supporting lesson ID(s), and move the complete lesson record to promotion history without changing its ID or dated evidence. Promotion dates do not count as evidence. Do not use legacy `Seen N×` text or generic evidence fields to meet the threshold; migrate only dates and citations verified from repository evidence, and leave unsupported history unpromoted with the gap stated. A severe single event may justify a clearly labeled temporary protection proposal, not an unapproved permanent policy.
 
-Follow the runner contract's stable range-key and recovery protocol. Save a record containing that key at the location configured in `docs/project-profile.md` (`docs/reviews/YYYY-MM-DD.md` by default); same-day distinct ranges must have separate entries, never overwrite an earlier record. A retry of the same range resumes/upserts the same entry and memory changes without duplicating lesson records or inflating a review date already recorded. Include the date/timezone, exact `from` and `through` SHAs, inspected commit count, evidence sources checked, findings grouped by category, Lessons and standards files changed, unresolved questions, runner status, and checks/CI evidence actually seen. If no evidence-backed issue or `Done right` was found, record the inspected range, sources checked, date, and `No new evidence-backed lesson`. If the archive location is `UNKNOWN`, cannot be written, or any required write/verification fails, report the incomplete range key and preserve the previous watermark. After every commit has been examined and the archive and memory-file updates have been re-read and verified, advance the reviewed-through watermark as the final write. Finish with a short report containing the same key fields and the archive path.
+Follow the runner contract's stable range-key and recovery protocol. Save an archive record at the location configured in `docs/project-profile.md` (`docs/reviews/YYYY-MM-DD.md` by default); distinct same-day ranges must have separate entries and a retry of the same key must reuse its entry. Include the date/timezone, exact `from` and `through` SHAs, inspected commit count, excluded-path summary, evidence sources checked, findings grouped by category, Lessons and standards changes, unresolved questions, runner status, and checks/CI evidence actually seen. If no evidence-backed issue or `Done right` was found, record the inspected range, exclusions, sources checked, date, and `No new evidence-backed lesson`.
 
-The Lesson-promotion CI gate validates only the already-persisted Lessons and standards records. It does not select or calculate the review range, run the retrospective, create the archive, or read/update `reviewed-through`; keep those responsibilities in the separate runner contract.
+Do not directly edit the archive, `LESSONS.md`, or its `reviewed-through` marker. Write archive and Lessons content to temporary UTF-8 input files outside the repository, then use the writer with the exact frozen manifest and the configured archive path:
+
+```bash
+python3 scripts/write-frozen-review.py \
+  --repo . \
+  --manifest "$TMPDIR/frozen-review-manifest.json" \
+  --archive docs/reviews/YYYY-MM-DD.md \
+  --archive-content "$TMPDIR/review-record.md" \
+  --lessons-content "$TMPDIR/lesson-entries.md"
+```
+
+An empty Lessons-content file records that there are no new Lessons; the archive record must not be empty. The writer upserts by range key, verifies the archive and Lessons updates, and advances `reviewed-through` to `through` only as its final durable write. Re-read the written record and Lessons after it succeeds. If the writer fails, any required write/verification fails, or the archive location is `UNKNOWN`/unwritable, stop, report the incomplete range key and preserve the prior watermark; never manually edit or advance the marker as a fallback. Finish with a short report containing the same key fields and archive path.
+
+The Lesson-promotion CI gate validates only the already-persisted Lessons and standards records. It does not select or calculate the review range, run the retrospective, create the archive, or read/update `reviewed-through`; those responsibilities remain with the frozen-range and writer scripts.

@@ -1173,5 +1173,6 @@ python3 "$REPO_ROOT/tests/test-installer-recovery.py"
 python3 "$REPO_ROOT/tests/test-installer-security.py"
 PYTHONDONTWRITEBYTECODE=1 python3 "$REPO_ROOT/tests/test-range-freezer.py"
 PYTHONDONTWRITEBYTECODE=1 python3 "$REPO_ROOT/tests/test-range-writer.py"
+PYTHONDONTWRITEBYTECODE=1 python3 "$REPO_ROOT/tests/test-daily-review-temp.py"
 
 echo "PASS: installer safety, hook, session-start, read-only range-freezer, and frozen-range writer regression tests"

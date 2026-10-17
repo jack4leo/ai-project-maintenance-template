@@ -1,9 +1,22 @@
 # Daily review of project changes
 
-Follow `AGENTS.md` and `docs/automation/runner-contract.md`. Do not calculate the range from `LESSONS.md` or the current branch yourself. Freeze it first and use only the resulting manifest:
+Follow `AGENTS.md` and `docs/automation/runner-contract.md`. Do not calculate the range from `LESSONS.md` or the current branch yourself. Run all snippets below in the same dedicated Bash script/process with `set -e`, not as separate shell invocations or in a long-lived interactive shell. Each invocation must allocate its own temporary directory; do not assume `TMPDIR` is set or share a fixed manifest path between invocations. The directory is removed after a successful run. If any command fails, the `EXIT` trap keeps it and prints its path for recovery/debugging; remove it manually after collecting the needed evidence:
 
 ```bash
-python3 scripts/freeze-review-range.py --repo . > "$TMPDIR/frozen-review-manifest.json"
+set -e
+review_tmp_dir="$(mktemp -d)" || exit 1
+review_tmp_dir_cleanup() {
+  status=$?
+  if [ "$status" -eq 0 ]; then
+    rm -rf -- "$review_tmp_dir"
+  else
+    printf 'Daily-review temporary files retained at: %s\n' "$review_tmp_dir" >&2
+  fi
+  return "$status"
+}
+trap review_tmp_dir_cleanup EXIT
+
+python3 scripts/freeze-review-range.py --repo . > "$review_tmp_dir/frozen-review-manifest.json"
 ```
 
 Before any review run, CI may validate the committed policy directly with the same parser:
@@ -40,13 +53,13 @@ Do not directly edit the archive, `LESSONS.md`, `docs/code-standards.md`, or the
 ```bash
 python3 scripts/write-frozen-review.py \
   --repo . \
-  --manifest "$TMPDIR/frozen-review-manifest.json" \
+  --manifest "$review_tmp_dir/frozen-review-manifest.json" \
   --archive docs/reviews/YYYY-MM-DD.md \
-  --archive-content "$TMPDIR/review-record.md" \
-  --lessons-content "$TMPDIR/lesson-entries.md"
+  --archive-content "$review_tmp_dir/review-record.md" \
+  --lessons-content "$review_tmp_dir/lesson-entries.md"
 ```
 
-When promoting, add both optional arguments `--promoted-lessons-content "$TMPDIR/promoted-lessons.md"` and `--promoted-standards-content "$TMPDIR/promoted-standards.md"`. The promoted record must preserve its Lesson ID and all verified dated citations; the standards entry must cite the supporting Lesson ID(s). Include each promoted record only in the promotion input, not in `--lessons-content`; the writer moves those IDs out of active history and upserts the promotion and standards blocks by range key. Do not pass these inputs when no promotion is due; the writer does not decide eligibility or verify that cited evidence is authentic.
+When promoting, add both optional arguments `--promoted-lessons-content "$review_tmp_dir/promoted-lessons.md"` and `--promoted-standards-content "$review_tmp_dir/promoted-standards.md"`. The promoted record must preserve its Lesson ID and all verified dated citations; the standards entry must cite the supporting Lesson ID(s). Include each promoted record only in the promotion input, not in `--lessons-content`; the writer moves those IDs out of active history and upserts the promotion and standards blocks by range key. Do not pass these inputs when no promotion is due; the writer does not decide eligibility or verify that cited evidence is authentic.
 
 An empty Lessons-content file records that there are no new active Lessons; the archive record must not be empty. Promotion inputs are a pair and must not be empty. The writer upserts by range key, verifies the archive and every requested memory update, and advances `reviewed-through` to `through` only as its final durable write. Re-read the written record, Lessons, and standards after it succeeds. If the writer fails, any required write/verification fails, or the archive location is `UNKNOWN`/unwritable, stop, report the incomplete range key and preserve the prior watermark; never manually edit or advance the marker as a fallback. Finish with a short report containing the same key fields and archive path.
 

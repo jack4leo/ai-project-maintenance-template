@@ -32,7 +32,7 @@ The Markdown documentation in this repository has been unified in **English**.
 - [`docs/maintenance-loop.md`](docs/maintenance-loop.md): The closed loop of initialization, daily development, PR review, daily review, and rule promotion.
 - [`docs/automation/runner-contract.md`](docs/automation/runner-contract.md): Input/output and permission contract for connecting reviews to any scheduled agent.
 - [`scripts/freeze-review-range.py`](scripts/freeze-review-range.py): Freezes a verified, read-only commit range and emits its canonical manifest and explicit path exclusions.
-- [`scripts/write-frozen-review.py`](scripts/write-frozen-review.py): Writes the archive and Lessons content for one frozen range, then advances its watermark as the final durable write.
+- [`scripts/write-frozen-review.py`](scripts/write-frozen-review.py): Writes archive and Lessons content for one frozen range; with paired promotion inputs, it also migrates promoted Lessons and writes stable rules to `docs/code-standards.md` before advancing the watermark as the final durable write.
 - [`scripts/validate_lesson_promotions.py`](scripts/validate_lesson_promotions.py): Validates persisted Lesson IDs, evidence dates, citations, and promotion references.
 - [`.github/workflows/lesson-promotion-gate.yml`](.github/workflows/lesson-promotion-gate.yml): Runs the persisted Lesson-promotion validator on pushes and pull requests; it does not run a retrospective.
 - [`prompts/`](prompts/): Reusable task prompts for project initialization, development, PR review, and daily review.

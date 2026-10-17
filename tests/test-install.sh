@@ -130,9 +130,9 @@ cat > "$no_listxattr_bin/python3" <<'SH'
 set -euo pipefail
 if [[ "${1:-}" == "-" ]]; then
   shift
-  exec "$SELF_EVOLUTION_REAL_PYTHON3" -c 'import os,sys; hasattr(os,"listxattr") and delattr(os,"listxattr"); exec(compile(sys.stdin.buffer.read(), "<stdin>", "exec"))' "$@"
+  exec "$SELF_EVOLUTION_REAL_PYTHON3" -c 'import os,sys; hasattr(os,"listxattr") and delattr(os,"listxattr"); sys.argv[0]="-"; exec(compile(sys.stdin.buffer.read(), "<stdin>", "exec"))' "$@"
 fi
-exec "$SELF_EVOLUTION_REAL_PYTHON3" "$@"
+exec "$SELF_EVOLUTION_REAL_PYTHON3" -c 'import os,runpy,sys; hasattr(os,"listxattr") and delattr(os,"listxattr"); script=sys.argv.pop(1); sys.argv[0]=script; runpy.run_path(script, run_name="__main__")' "$@"
 SH
 chmod +x "$no_listxattr_bin/python3"
 no_listxattr_target="$TMP_DIR/no-listxattr-target"
@@ -147,7 +147,9 @@ PATH="$no_listxattr_bin:$PATH" SELF_EVOLUTION_REAL_PYTHON3="$real_python3" \
 cmp -s "$TMP_DIR/no-listxattr-before.json" "$no_listxattr_target/.codex/hooks.json" \
   || fail "missing os.listxattr fallback changed existing Codex settings"
 [[ -f "$no_listxattr_target/.claude/settings.json" ]] \
-  || fail "missing os.listxattr fallback blocked independent Claude hook registration"
+  || fail "missing os.listxattr blocked independent Claude hook registration"
+[[ -f "$no_listxattr_target/.agent-maintenance/installer-transaction.py" ]] \
+  || fail "missing os.listxattr blocked transactional template publication"
 grep -Fq 'startup-hook registration is skipped' "$TMP_DIR/no-listxattr.log" \
   || fail "missing os.listxattr fallback did not report the Codex hook conflict"
 

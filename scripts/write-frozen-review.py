@@ -23,12 +23,19 @@ ARCHIVE_START = re.compile(rb"^<!-- frozen-review-range: (sha256:[0-9a-f]{64}) -
 ARCHIVE_END = re.compile(rb"^<!-- /frozen-review-range: (sha256:[0-9a-f]{64}) -->$", re.MULTILINE)
 LESSON_START = re.compile(rb"^<!-- frozen-review-lessons: (sha256:[0-9a-f]{64}) -->$", re.MULTILINE)
 LESSON_END = re.compile(rb"^<!-- /frozen-review-lessons: (sha256:[0-9a-f]{64}) -->$", re.MULTILINE)
+PROMOTED_LESSON_START = re.compile(rb"^<!-- frozen-review-promotion: (sha256:[0-9a-f]{64}) -->$", re.MULTILINE)
+PROMOTED_LESSON_END = re.compile(rb"^<!-- /frozen-review-promotion: (sha256:[0-9a-f]{64}) -->$", re.MULTILINE)
+PROMOTED_STANDARD_START = re.compile(rb"^<!-- frozen-review-standard: (sha256:[0-9a-f]{64}) -->$", re.MULTILINE)
+PROMOTED_STANDARD_END = re.compile(rb"^<!-- /frozen-review-standard: (sha256:[0-9a-f]{64}) -->$", re.MULTILINE)
 RANGE_KEY = re.compile(r"^sha256:[0-9a-f]{64}$")
 OBJECT_ID = re.compile(r"^[0-9a-f]+$")
 LOCK_NAME = "frozen-review-writer.lock"
 POLICY_PATH = "docs/automation/range-exclusions.json"
 RULE_ID = re.compile(r"^[a-z0-9][a-z0-9-]*$")
 SHA256_HEX = re.compile(r"^[0-9a-f]{64}$")
+PROMOTION_HEADING = re.compile(r"^### (L-[0-9]{4,}) — .+$", re.MULTILINE)
+LESSON_ID_HEADING = re.compile(r"^### (L-[0-9]{4,})(?:\s|$)")
+STANDARD_HEADING = re.compile(r"^##### (PS-[0-9]{4,}) — .+$")
 
 
 class WriterError(Exception):
@@ -589,6 +596,161 @@ def replace_or_append_block(document: bytes, key: str, body: bytes, start_re: re
     return b"".join(lines)
 
 
+def _replace_lesson_section_content(document: bytes, name: str, content: bytes) -> bytes:
+    lines = document.splitlines(keepends=True)
+    start, end = lesson_section_markers(lines, name)
+    if end is None:
+        end = lesson_section_markers(lines, "PROMOTED_LESSONS")[0] if name == "ACTIVE_LESSONS" else len(lines)
+    lines[start + 1 : end] = content.splitlines(keepends=True)
+    return b"".join(lines)
+
+
+def range_block_spans(
+    section: bytes,
+    start_re: re.Pattern[bytes],
+    end_re: re.Pattern[bytes],
+) -> tuple[list[bytes], list[tuple[int, int, str]]]:
+    lines = section.splitlines(keepends=True)
+    blocks: list[tuple[int, int, str]] = []
+    opened: tuple[int, str] | None = None
+    for index, line in enumerate(lines):
+        plain = line.rstrip(b"\r\n")
+        start_match = start_re.fullmatch(plain)
+        end_match = end_re.fullmatch(plain)
+        if start_match:
+            if opened is not None:
+                raise WriterError("nested or unbalanced frozen-range markers are not supported")
+            opened = (index, start_match.group(1).decode("ascii"))
+        elif end_match:
+            key = end_match.group(1).decode("ascii")
+            if opened is None or opened[1] != key:
+                raise WriterError("unbalanced frozen-range marker pair")
+            blocks.append((opened[0], index, key))
+            opened = None
+    if opened is not None:
+        raise WriterError("unclosed frozen-range marker")
+    return lines, blocks
+
+
+def lesson_ids_in_content(content: bytes, label: str, required: bool = False) -> list[str]:
+    try:
+        text = content.decode("utf-8", errors="strict")
+    except UnicodeDecodeError as exc:
+        raise WriterError(f"{label} content must be valid UTF-8") from exc
+    ids: list[str] = []
+    for line in text.splitlines():
+        if not line.startswith("### L-"):
+            continue
+        heading = PROMOTION_HEADING.fullmatch(line)
+        if heading is None:
+            raise WriterError(f"{label} Lesson headings must use '### L-0001 — <rule>'")
+        ids.append(heading.group(1))
+    if required and not ids:
+        raise WriterError(f"{label} content must contain at least one stable Lesson ID")
+    if len(ids) != len(set(ids)):
+        raise WriterError(f"{label} content contains a duplicate Lesson ID")
+    return ids
+
+
+def standard_ids_in_content(content: bytes, label: str, required: bool = False) -> list[str]:
+    try:
+        text = content.decode("utf-8", errors="strict")
+    except UnicodeDecodeError as exc:
+        raise WriterError(f"{label} content must be valid UTF-8") from exc
+    ids: list[str] = []
+    for line in text.splitlines():
+        if not line.startswith("##### PS-"):
+            continue
+        heading = STANDARD_HEADING.fullmatch(line)
+        if heading is None:
+            raise WriterError(f"{label} headings must use '##### PS-0001 — <rule>'")
+        ids.append(heading.group(1))
+    if required and not ids:
+        raise WriterError(f"{label} content must contain at least one stable PS rule ID")
+    if len(ids) != len(set(ids)):
+        raise WriterError(f"{label} content contains a duplicate PS rule ID")
+    return ids
+
+
+def _lesson_id_from_line(line: bytes) -> str | None:
+    try:
+        text = line.decode("utf-8", errors="strict").rstrip("\r\n")
+    except UnicodeDecodeError as exc:
+        raise WriterError("Lessons content must be valid UTF-8") from exc
+    match = LESSON_ID_HEADING.match(text)
+    return match.group(1) if match else None
+
+
+def remove_promoted_from_active(section: bytes, promoted_ids: set[str]) -> tuple[bytes, dict[str, int]]:
+    lines, blocks = range_block_spans(section, LESSON_START, LESSON_END)
+    managed_body_lines = {
+        index
+        for start, end, _key in blocks
+        for index in range(start + 1, end)
+    }
+    counts = {lesson_id: 0 for lesson_id in promoted_ids}
+    for index, line in enumerate(lines):
+        lesson_id = _lesson_id_from_line(line)
+        if lesson_id not in promoted_ids:
+            continue
+        if index not in managed_body_lines:
+            raise WriterError(f"promoted Lesson {lesson_id} is outside a writer-managed active range block")
+        counts[lesson_id] += 1
+    duplicates = [lesson_id for lesson_id, count in counts.items() if count > 1]
+    if duplicates:
+        raise WriterError("active Lessons contains duplicate IDs to promote: " + ", ".join(sorted(duplicates)))
+
+    for start, end, _key in reversed(blocks):
+        body_lines = lines[start + 1 : end]
+        headings = [index for index, line in enumerate(body_lines) if line.startswith(b"### ")]
+        if not headings:
+            continue
+        kept = body_lines[: headings[0]]
+        for position, record_start in enumerate(headings):
+            record_end = headings[position + 1] if position + 1 < len(headings) else len(body_lines)
+            if _lesson_id_from_line(body_lines[record_start]) in promoted_ids:
+                continue
+            kept.extend(body_lines[record_start:record_end])
+        lines[start + 1 : end] = kept
+    return b"".join(lines), counts
+
+
+def update_promoted_standards(document: bytes, key: str, body: bytes) -> bytes:
+    lines = document.splitlines(keepends=True)
+    start_marker = b"<!-- PROMOTED_RULES:START -->"
+    end_marker = b"<!-- PROMOTED_RULES:END -->"
+    starts = [i for i, line in enumerate(lines) if line.rstrip(b"\r\n") == start_marker]
+    ends = [i for i, line in enumerate(lines) if line.rstrip(b"\r\n") == end_marker]
+    if len(starts) != 1 or len(ends) != 1 or starts[0] >= ends[0]:
+        raise WriterError("docs/code-standards.md must contain one ordered PROMOTED_RULES marker pair")
+    section = b"".join(lines[starts[0] + 1 : ends[0]])
+    _section_lines, existing_blocks = range_block_spans(section, PROMOTED_STANDARD_START, PROMOTED_STANDARD_END)
+    new_ids = set(standard_ids_in_content(body, "promoted standards", required=True))
+    same_key_ids: set[str] = set()
+    for block_start, block_end, existing_key in existing_blocks:
+        block_body = b"".join(_section_lines[block_start + 1 : block_end])
+        existing_ids = set(standard_ids_in_content(block_body, "existing promoted standards"))
+        if existing_key == key:
+            same_key_ids.update(existing_ids)
+        elif new_ids & existing_ids:
+            raise WriterError("promoted standards rule IDs already belong to a different range_key")
+    if not same_key_ids.issubset(new_ids):
+        raise WriterError("a retry cannot remove a previously written promoted standards rule")
+    start = f"<!-- frozen-review-standard: {key} -->".encode("ascii")
+    end = f"<!-- /frozen-review-standard: {key} -->".encode("ascii")
+    updated_section = replace_or_append_block(
+        section,
+        key,
+        body,
+        PROMOTED_STANDARD_START,
+        PROMOTED_STANDARD_END,
+        start,
+        end,
+    )
+    lines[starts[0] + 1 : ends[0]] = updated_section.splitlines(keepends=True)
+    return b"".join(lines)
+
+
 def update_archive(document: bytes | None, manifest: dict[str, Any], body: bytes) -> bytes:
     current = document or b""
     key = manifest["range_key"]
@@ -599,7 +761,12 @@ def update_archive(document: bytes | None, manifest: dict[str, Any], body: bytes
     return replace_or_append_block(current, key, complete_body, ARCHIVE_START, ARCHIVE_END, start, end)
 
 
-def update_lessons(document: bytes, manifest: dict[str, Any], body: bytes) -> bytes:
+def update_lessons(
+    document: bytes,
+    manifest: dict[str, Any],
+    body: bytes,
+    promoted_body: bytes | None = None,
+) -> bytes:
     marker, _, _ = marker_value(document)
     key = manifest["range_key"]
     start = f"<!-- frozen-review-lessons: {key} -->".encode("ascii")
@@ -614,14 +781,76 @@ def update_lessons(document: bytes, manifest: dict[str, Any], body: bytes) -> by
         raise WriterError("LESSONS.md must not mix legacy and paired section markers")
     if active >= promoted or (active_end is not None and active_end >= promoted):
         raise WriterError("LESSONS.md must keep ACTIVE_LESSONS before PROMOTED_LESSONS")
-    section_end = active_end if active_end is not None else promoted
-    if section_end < active + 1:
+    active_section_end = active_end if active_end is not None else promoted
+    promoted_section_end = promoted_end if promoted_end is not None else len(lines)
+    if active_section_end < active + 1 or promoted_section_end < promoted + 1:
         raise WriterError("LESSONS.md has an invalid ACTIVE_LESSONS section")
-    section = b"".join(lines[active + 1 : section_end])
-    updated_section = replace_or_append_block(section, key, body, LESSON_START, LESSON_END, start, end, insertion_point=None)
-    # In the Lessons file, append new range blocks at the end of the active section.
-    # Existing keys are replaced in place by the block updater.
-    document = b"".join(lines[: active + 1]) + updated_section + b"".join(lines[section_end:])
+    active_section = b"".join(lines[active + 1 : active_section_end])
+    promoted_section = b"".join(lines[promoted + 1 : promoted_section_end])
+
+    if promoted_body is not None:
+        promoted_ids = set(lesson_ids_in_content(promoted_body, "promoted Lessons", required=True))
+        active_input_ids = set(lesson_ids_in_content(body, "active Lessons"))
+        if promoted_ids & active_input_ids:
+            raise WriterError("a promoted Lesson must not also be supplied as active content")
+
+        promo_lines, promo_blocks = range_block_spans(
+            promoted_section,
+            PROMOTED_LESSON_START,
+            PROMOTED_LESSON_END,
+        )
+        current_promotion_ids: set[str] = set()
+        seen_promoted_ids: dict[str, str] = {}
+        for block_start, block_end, existing_key in promo_blocks:
+            block_body = b"".join(promo_lines[block_start + 1 : block_end])
+            existing_ids = lesson_ids_in_content(block_body, "existing promoted Lessons")
+            for lesson_id in existing_ids:
+                if lesson_id in seen_promoted_ids:
+                    raise WriterError(f"promoted Lesson {lesson_id} already appears in multiple range blocks")
+                seen_promoted_ids[lesson_id] = existing_key
+                if existing_key == key:
+                    current_promotion_ids.add(lesson_id)
+                elif lesson_id in promoted_ids:
+                    raise WriterError(f"promoted Lesson {lesson_id} already belongs to a different range_key")
+        if not current_promotion_ids.issubset(promoted_ids):
+            raise WriterError("a retry cannot remove a previously written promoted Lesson")
+
+        active_section, active_counts = remove_promoted_from_active(active_section, promoted_ids)
+        missing = [
+            lesson_id
+            for lesson_id in promoted_ids
+            if active_counts[lesson_id] == 0 and lesson_id not in current_promotion_ids
+        ]
+        if missing:
+            raise WriterError(
+                "promoted Lesson must first exist in active history (or this range's retry block): "
+                + ", ".join(sorted(missing))
+            )
+        promoted_start = f"<!-- frozen-review-promotion: {key} -->".encode("ascii")
+        promoted_end = f"<!-- /frozen-review-promotion: {key} -->".encode("ascii")
+        promoted_section = replace_or_append_block(
+            promoted_section,
+            key,
+            promoted_body,
+            PROMOTED_LESSON_START,
+            PROMOTED_LESSON_END,
+            promoted_start,
+            promoted_end,
+        )
+        document = _replace_lesson_section_content(document, "PROMOTED_LESSONS", promoted_section)
+
+    active_start = f"<!-- frozen-review-lessons: {key} -->".encode("ascii")
+    active_end_line = f"<!-- /frozen-review-lessons: {key} -->".encode("ascii")
+    active_section = replace_or_append_block(
+        active_section,
+        key,
+        body,
+        LESSON_START,
+        LESSON_END,
+        active_start,
+        active_end_line,
+    )
+    document = _replace_lesson_section_content(document, "ACTIVE_LESSONS", active_section)
     current_marker, _, _ = marker_value(document)
     if current_marker != marker:
         raise WriterError("Lessons updater unexpectedly changed reviewed-through")
@@ -640,17 +869,49 @@ def verify_block(document: bytes, key: str, start_re: re.Pattern[bytes], end_re:
         raise WriterError("written range block could not be verified")
 
 
-def write_review(repo_path: Path, manifest_path: Path, archive_rel: str, archive_content_path: Path, lessons_content_path: Path) -> dict[str, str]:
+def write_review(
+    repo_path: Path,
+    manifest_path: Path,
+    archive_rel: str,
+    archive_content_path: Path,
+    lessons_content_path: Path,
+    promoted_lessons_content_path: Path | None = None,
+    promoted_standards_content_path: Path | None = None,
+) -> dict[str, str]:
     manifest = load_manifest(manifest_path)
     archive_parts = validate_relative_archive(archive_rel)
+    if (promoted_lessons_content_path is None) != (promoted_standards_content_path is None):
+        raise WriterError("promoted Lessons and promoted standards inputs must be supplied together")
     try:
         archive_body = archive_content_path.read_bytes()
         lesson_body = lessons_content_path.read_bytes()
+        promoted_lesson_body = (
+            promoted_lessons_content_path.read_bytes()
+            if promoted_lessons_content_path is not None
+            else None
+        )
+        promoted_standards_body = (
+            promoted_standards_content_path.read_bytes()
+            if promoted_standards_content_path is not None
+            else None
+        )
     except OSError as exc:
         raise WriterError(f"cannot read review content input: {exc}") from exc
     if not archive_body.strip():
         raise WriterError("archive review content must not be empty")
-    for label, body in (("archive", archive_body), ("Lessons", lesson_body)):
+    content_inputs = [("archive", archive_body), ("Lessons", lesson_body)]
+    if promoted_lesson_body is not None and promoted_standards_body is not None:
+        if not promoted_lesson_body.strip() or not promoted_standards_body.strip():
+            raise WriterError("promotion inputs must both contain at least one record")
+        lesson_ids_in_content(promoted_lesson_body, "promoted Lessons", required=True)
+        standard_ids_in_content(promoted_standards_body, "promoted standards", required=True)
+        content_inputs.extend(
+            [
+                ("promoted Lessons", promoted_lesson_body),
+                ("promoted standards", promoted_standards_body),
+            ]
+        )
+    for label, body in content_inputs:
         if b"\x00" in body:
             raise WriterError(f"{label} content must not contain NUL bytes")
         try:
@@ -662,6 +923,7 @@ def write_review(repo_path: Path, manifest_path: Path, archive_rel: str, archive
     lock_dir_fd: int | None = None
     lock_fd: int | None = None
     archive_parent_fd: int | None = None
+    standards_parent_fd: int | None = None
     try:
         common_dir = git_common_dir(repo_path)
         lock_dir_fd, lock_fd = acquire_writer_lock(common_dir)
@@ -674,9 +936,49 @@ def write_review(repo_path: Path, manifest_path: Path, archive_rel: str, archive
         if old_watermark not in (manifest["from"], manifest["through"]):
             raise WriterError("reviewed-through must equal this manifest's from or through; refusing a different or stale range")
 
+        standards_bytes: bytes | None = None
+        standards_identity: tuple[int, ...] | None = None
+        updated_standards: bytes | None = None
+        if promoted_lesson_body is not None and promoted_standards_body is not None:
+            standards_parent_fd = open_directory_chain(root_fd, ("docs",), create=False)
+            standards_bytes, standards_identity, _ = read_file_at(
+                standards_parent_fd,
+                "code-standards.md",
+                "docs/code-standards.md",
+            )
+            if standards_bytes is None or standards_identity is None:
+                raise WriterError("docs/code-standards.md is missing")
+            updated_standards = update_promoted_standards(
+                standards_bytes,
+                manifest["range_key"],
+                promoted_standards_body,
+            )
+        updated_lessons = update_lessons(
+            lessons_bytes,
+            manifest,
+            lesson_body,
+            promoted_lesson_body,
+        )
+        verify_block(updated_lessons, manifest["range_key"], LESSON_START, LESSON_END)
+        if promoted_lesson_body is not None:
+            verify_block(
+                updated_lessons,
+                manifest["range_key"],
+                PROMOTED_LESSON_START,
+                PROMOTED_LESSON_END,
+            )
+        if updated_standards is not None:
+            verify_block(
+                updated_standards,
+                manifest["range_key"],
+                PROMOTED_STANDARD_START,
+                PROMOTED_STANDARD_END,
+            )
+
         archive_parent_fd = open_directory_chain(root_fd, archive_parts[:-1], create=True)
         archive_bytes, archive_identity, _ = read_file_at(archive_parent_fd, archive_name, archive_rel)
         updated_archive = update_archive(archive_bytes, manifest, archive_body)
+        verify_block(updated_archive, manifest["range_key"], ARCHIVE_START, ARCHIVE_END)
         atomic_write_at(
             archive_parent_fd,
             archive_name,
@@ -689,7 +991,30 @@ def write_review(repo_path: Path, manifest_path: Path, archive_rel: str, archive
             raise WriterError("archive re-read did not match the expected range-key upsert")
         verify_block(check_archive, manifest["range_key"], ARCHIVE_START, ARCHIVE_END)
 
-        updated_lessons = update_lessons(lessons_bytes, manifest, lesson_body)
+        if updated_standards is not None:
+            if standards_parent_fd is None or standards_bytes is None or standards_identity is None:
+                raise WriterError("promotion standards snapshot was not recorded")
+            atomic_write_at(
+                standards_parent_fd,
+                "code-standards.md",
+                updated_standards,
+                "docs/code-standards.md",
+                (standards_bytes, standards_identity),
+            )
+            check_standards, _, _ = read_file_at(
+                standards_parent_fd,
+                "code-standards.md",
+                "docs/code-standards.md",
+            )
+            if check_standards != updated_standards:
+                raise WriterError("standards re-read did not match the expected range-key upsert")
+            verify_block(
+                check_standards,
+                manifest["range_key"],
+                PROMOTED_STANDARD_START,
+                PROMOTED_STANDARD_END,
+            )
+
         # Lessons content is written while the previous watermark is still present.
         atomic_write_at(
             root_fd,
@@ -705,12 +1030,33 @@ def write_review(repo_path: Path, manifest_path: Path, archive_rel: str, archive
         if check_marker != old_watermark:
             raise WriterError("reviewed-through changed before archive and Lessons verification completed")
         verify_block(check_lessons, manifest["range_key"], LESSON_START, LESSON_END)
+        if promoted_lesson_body is not None:
+            verify_block(
+                check_lessons,
+                manifest["range_key"],
+                PROMOTED_LESSON_START,
+                PROMOTED_LESSON_END,
+            )
 
-        # Re-verify the archive immediately before the final durable watermark write.
+        # Re-verify every requested record immediately before the final durable watermark write.
         final_archive, _, _ = read_file_at(archive_parent_fd, archive_name, archive_rel)
         if final_archive != updated_archive:
             raise WriterError("archive changed before watermark advancement")
         verify_block(final_archive, manifest["range_key"], ARCHIVE_START, ARCHIVE_END)
+        if updated_standards is not None and standards_parent_fd is not None:
+            final_standards, _, _ = read_file_at(
+                standards_parent_fd,
+                "code-standards.md",
+                "docs/code-standards.md",
+            )
+            if final_standards != updated_standards:
+                raise WriterError("standards changed before watermark advancement")
+            verify_block(
+                final_standards,
+                manifest["range_key"],
+                PROMOTED_STANDARD_START,
+                PROMOTED_STANDARD_END,
+            )
 
         final_lessons = set_watermark(check_lessons, manifest["through"])
         # No file write follows this atomic replacement. On retry where the marker
@@ -732,6 +1078,8 @@ def write_review(repo_path: Path, manifest_path: Path, archive_rel: str, archive
     except OSError as exc:
         raise WriterError(f"filesystem safety check failed: {exc}") from exc
     finally:
+        if standards_parent_fd is not None:
+            os.close(standards_parent_fd)
         if archive_parent_fd is not None:
             os.close(archive_parent_fd)
         if lock_fd is not None:
@@ -748,9 +1096,27 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--archive", required=True, help="explicit repository-relative docs/reviews/*.md destination")
     parser.add_argument("--archive-content", required=True, type=Path, help="UTF-8 review record body to upsert")
     parser.add_argument("--lessons-content", required=True, type=Path, help="UTF-8 Lessons entries; an empty file records no entries yet")
+    parser.add_argument(
+        "--promoted-lessons-content",
+        type=Path,
+        help="complete promoted Lesson records to migrate into PROMOTED_LESSONS",
+    )
+    parser.add_argument(
+        "--promoted-standards-content",
+        type=Path,
+        help="promoted PS rule records to upsert into docs/code-standards.md",
+    )
     args = parser.parse_args(argv)
     try:
-        result = write_review(args.repo, args.manifest, args.archive, args.archive_content, args.lessons_content)
+        result = write_review(
+            args.repo,
+            args.manifest,
+            args.archive,
+            args.archive_content,
+            args.lessons_content,
+            args.promoted_lessons_content,
+            args.promoted_standards_content,
+        )
         print(json.dumps(result, ensure_ascii=False, sort_keys=True, separators=(",", ":")))
     except (WriterError, OSError, subprocess.SubprocessError) as exc:
         print(f"write-frozen-review: {exc}", file=sys.stderr)

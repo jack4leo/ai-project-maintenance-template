@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import subprocess
 import sys
@@ -16,10 +17,14 @@ from unittest import mock
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 WRITER_PATH = REPO_ROOT / "scripts" / "write-frozen-review.py"
+FREEZER_PATH = REPO_ROOT / "scripts" / "freeze-review-range.py"
 sys.dont_write_bytecode = True
 WRITER = types.ModuleType("write_frozen_review")
 WRITER.__file__ = str(WRITER_PATH)
 exec(compile(WRITER_PATH.read_text(encoding="utf-8"), str(WRITER_PATH), "exec"), WRITER.__dict__)
+FREEZER = types.ModuleType("freeze_review_range")
+FREEZER.__file__ = str(FREEZER_PATH)
+exec(compile(FREEZER_PATH.read_text(encoding="utf-8"), str(FREEZER_PATH), "exec"), FREEZER.__dict__)
 
 
 FROM = "a" * 40
@@ -45,11 +50,24 @@ def make_manifest(from_sha: str = FROM, through: str = THROUGH) -> dict[str, obj
         "from": from_sha,
         "through": through,
         "commits": [{"sha": "c" * len(from_sha), "tree": "d" * len(from_sha), "parents": [from_sha]}],
-        "exclusion_policy": {"source_path": "docs/automation/range-exclusions.json", "rules": []},
+        "exclusion_policy": {
+            "source_path": "docs/automation/range-exclusions.json",
+            "source_commit": through,
+            "source_blob": "e" * len(from_sha),
+            "source_sha256": "f" * 64,
+            "policy_version": 1,
+            "rules": [],
+        },
         "excluded_paths": [],
     }
     manifest = dict(payload)
-    manifest["range_key"] = "sha256:" + __import__("hashlib").sha256(WRITER.canonical_json(payload)).hexdigest()
+    manifest["range_key"] = "sha256:" + hashlib.sha256(WRITER.canonical_json(payload)).hexdigest()
+    return manifest
+
+
+def reseal_manifest(manifest: dict[str, object]) -> dict[str, object]:
+    payload = {key: value for key, value in manifest.items() if key != "range_key"}
+    manifest["range_key"] = "sha256:" + hashlib.sha256(WRITER.canonical_json(payload)).hexdigest()
     return manifest
 
 
@@ -75,7 +93,7 @@ class FrozenWriterTests(unittest.TestCase):
         git(self.repo, "config", "user.email", "writer-test@example.invalid")
         self.lessons = self.repo / "LESSONS.md"
         self.lessons.write_text(
-            f"<!-- reviewed-through: {FROM} -->\n# Lessons\n\n## Active lessons\n\n<!-- ACTIVE_LESSONS -->\n\n## Promotion history\n\n<!-- PROMOTED_LESSONS -->\n",
+            f"<!-- reviewed-through: {FROM} -->\n# Lessons\n\n## Active lessons\n\n<!-- ACTIVE_LESSONS:START -->\n<!-- ACTIVE_LESSONS:END -->\n\n## Promotion history\n\n<!-- PROMOTED_LESSONS:START -->\n<!-- PROMOTED_LESSONS:END -->\n",
             encoding="utf-8",
         )
         self.inputs = self.root / "inputs"
@@ -103,6 +121,102 @@ class FrozenWriterTests(unittest.TestCase):
             WRITER.write_review(self.repo, mpath, "docs/reviews/bad.md", apath, lpath)
         self.assertEqual(self.lessons.read_bytes(), before)
         self.assertFalse((self.repo / "docs/reviews/bad.md").exists())
+
+    def test_actual_freezer_manifest_with_exclusions_is_accepted_and_written(self) -> None:
+        self.lessons.write_text(
+            self.lessons.read_text(encoding="utf-8").replace(FROM, "UNKNOWN", 1),
+            encoding="utf-8",
+        )
+        policy_path = self.repo / "docs/automation/range-exclusions.json"
+        policy_path.parent.mkdir(parents=True)
+        policy_path.write_text(
+            json.dumps(
+                {
+                    "policy_version": 1,
+                    "rules": [
+                        {
+                            "id": "review-records",
+                            "kind": "path-glob",
+                            "patterns": ["docs/reviews/**"],
+                            "reason": "review records are excluded from code review ranges",
+                        }
+                    ],
+                },
+                separators=(",", ":"),
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        (self.repo / "README.md").write_text("baseline\n", encoding="utf-8")
+        git(self.repo, "add", "LESSONS.md", "README.md", "docs/automation/range-exclusions.json")
+        git(self.repo, "commit", "-m", "baseline")
+        from_sha = git(self.repo, "rev-parse", "HEAD")
+        self.lessons.write_text(
+            self.lessons.read_text(encoding="utf-8").replace("reviewed-through: UNKNOWN", f"reviewed-through: {from_sha}", 1),
+            encoding="utf-8",
+        )
+        review_dir = self.repo / "docs/reviews"
+        review_dir.mkdir(parents=True)
+        (review_dir / "excluded-input.md").write_text("excluded record\n", encoding="utf-8")
+        git(self.repo, "add", "LESSONS.md", "docs/reviews/excluded-input.md")
+        git(self.repo, "commit", "-m", "advance range and add excluded review record")
+
+        manifest = FREEZER.freeze_range(self.repo)
+        self.assertEqual(manifest["from"], from_sha)
+        self.assertEqual(len(manifest["excluded_paths"]), 1)
+        manifest_path, archive_path, lessons_path = write_inputs(
+            self.inputs, manifest, "review body", "### Actual freezer lesson"
+        )
+        result = WRITER.write_review(
+            self.repo,
+            manifest_path,
+            "docs/reviews/2026-10-17.md",
+            archive_path,
+            lessons_path,
+        )
+        self.assertEqual(result["range_key"], manifest["range_key"])
+        self.assertIn(f"reviewed-through: {manifest['through']}", self.lessons.read_text(encoding="utf-8").splitlines()[0])
+        self.assertTrue((review_dir / "2026-10-17.md").exists())
+
+    def test_nested_manifest_schema_rejects_non_freezer_shapes_even_with_resealed_key(self) -> None:
+        cases: list[tuple[str, dict[str, object]]] = []
+        bad_commit = json.loads(json.dumps(self.manifest))
+        bad_commit["commits"][0]["unexpected"] = "accepted by the old validator"
+        cases.append(("commit record", bad_commit))
+        bad_policy = json.loads(json.dumps(self.manifest))
+        bad_policy["exclusion_policy"]["rules"] = {"not": "an array"}
+        cases.append(("policy rules", bad_policy))
+        bad_exclusion = json.loads(json.dumps(self.manifest))
+        bad_exclusion["excluded_paths"] = [{"unexpected": "record"}]
+        cases.append(("excluded-path record", bad_exclusion))
+
+        for index, (label, bad) in enumerate(cases):
+            with self.subTest(label=label):
+                reseal_manifest(bad)
+                manifest_path, archive_path, lessons_path = write_inputs(
+                    self.inputs, bad, f"bad-{index}", f"bad-{index}"
+                )
+                with self.assertRaisesRegex(WRITER.WriterError, "malformed|unexpected|rules"):
+                    WRITER.write_review(
+                        self.repo,
+                        manifest_path,
+                        f"docs/reviews/bad-{index}.md",
+                        archive_path,
+                        lessons_path,
+                    )
+                self.assertFalse((self.repo / "docs").exists())
+
+    def test_legacy_single_line_lesson_anchors_remain_supported(self) -> None:
+        self.lessons.write_text(
+            f"<!-- reviewed-through: {FROM} -->\n# Lessons\n\n## Active lessons\n\n<!-- ACTIVE_LESSONS -->\n\n## Promotion history\n\n<!-- PROMOTED_LESSONS -->\n",
+            encoding="utf-8",
+        )
+        self.run_writer("legacy archive", "### Legacy-compatible lesson")
+        lessons = self.lessons.read_text(encoding="utf-8")
+        self.assertIn("<!-- ACTIVE_LESSONS -->", lessons)
+        self.assertIn("<!-- PROMOTED_LESSONS -->", lessons)
+        self.assertIn("Legacy-compatible lesson", lessons)
+        self.assertLess(lessons.index("Legacy-compatible lesson"), lessons.index("<!-- PROMOTED_LESSONS -->"))
 
     def test_same_key_retry_replaces_only_its_blocks_and_preserves_other_ranges(self) -> None:
         review_dir = self.repo / "docs" / "reviews"
@@ -216,6 +330,84 @@ class FrozenWriterTests(unittest.TestCase):
             WRITER._cleanup_owned_temp(directory_fd, temp_name, (owned_info.st_dev, owned_info.st_ino))
             self.assertTrue((self.repo / temp_name).exists(), "cleanup removed a path whose inode was not transaction-owned")
             self.assertEqual((self.repo / held_name).read_text(encoding="utf-8"), "transaction inode\n")
+        finally:
+            os.close(directory_fd)
+
+    def test_staged_path_inode_swap_is_detected_before_publish_and_unowned_path_is_preserved(self) -> None:
+        directory_fd = os.open(self.repo, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        target = self.repo / "snapshot.md"
+        target.write_text("original target\n", encoding="utf-8")
+        real_fsync = os.fsync
+        swapped = False
+
+        def swap_staged_path(fd: int) -> None:
+            nonlocal swapped
+            real_fsync(fd)
+            if swapped:
+                return
+            names = [
+                name
+                for name in os.listdir(directory_fd)
+                if name.startswith(".snapshot.md.frozen-review-writer-") and name.endswith(".tmp")
+            ]
+            self.assertEqual(len(names), 1)
+            temp_name = names[0]
+            os.rename(temp_name, temp_name + ".held", src_dir_fd=directory_fd, dst_dir_fd=directory_fd)
+            replacement_fd = os.open(
+                temp_name,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                0o600,
+                dir_fd=directory_fd,
+            )
+            try:
+                os.write(replacement_fd, b"unowned replacement\n")
+            finally:
+                os.close(replacement_fd)
+            swapped = True
+
+        try:
+            with mock.patch.object(WRITER.os, "fsync", side_effect=swap_staged_path):
+                with self.assertRaisesRegex(WRITER.WriterError, "no longer names this transaction"):
+                    WRITER.atomic_write_at(directory_fd, "snapshot.md", b"new target\n", "snapshot.md")
+            self.assertTrue(swapped, "test did not replace the staged directory entry")
+            self.assertEqual(target.read_text(encoding="utf-8"), "original target\n")
+            leftovers = [name for name in os.listdir(directory_fd) if ".frozen-review-writer-" in name]
+            self.assertEqual(len(leftovers), 2, "unverified staging paths should remain available for inspection")
+            self.assertTrue(any(name.endswith(".held") for name in leftovers))
+            self.assertTrue(any(name.endswith(".tmp") for name in leftovers))
+        finally:
+            os.close(directory_fd)
+
+    def test_path_swap_in_final_rename_gap_is_reported_as_uncertain(self) -> None:
+        directory_fd = os.open(self.repo, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        target = self.repo / "snapshot.md"
+        target.write_text("original target\n", encoding="utf-8")
+        real_replace = os.replace
+        swapped = False
+
+        def swap_then_replace(src: str, dst: str, *, src_dir_fd: int, dst_dir_fd: int) -> None:
+            nonlocal swapped
+            os.rename(src, src + ".held", src_dir_fd=src_dir_fd, dst_dir_fd=src_dir_fd)
+            replacement_fd = os.open(
+                src,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                0o600,
+                dir_fd=src_dir_fd,
+            )
+            try:
+                os.write(replacement_fd, b"unowned replacement\n")
+            finally:
+                os.close(replacement_fd)
+            swapped = True
+            real_replace(src, dst, src_dir_fd=src_dir_fd, dst_dir_fd=dst_dir_fd)
+
+        try:
+            with mock.patch.object(WRITER.os, "replace", side_effect=swap_then_replace):
+                with self.assertRaisesRegex(WRITER.WriterError, "does not have the staged transaction inode"):
+                    WRITER.atomic_write_at(directory_fd, "snapshot.md", b"new target\n", "snapshot.md")
+            self.assertTrue(swapped, "test did not inject a path swap in the final rename gap")
+            self.assertEqual(target.read_text(encoding="utf-8"), "unowned replacement\n")
+            self.assertTrue(any(name.endswith(".held") for name in os.listdir(directory_fd)))
         finally:
             os.close(directory_fd)
 

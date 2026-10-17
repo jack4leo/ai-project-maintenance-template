@@ -150,7 +150,7 @@ def _parse_lessons(text: str, errors: list[str]) -> dict[str, Lesson]:
     ):
         block, first_line = _marked_block(text, block_name, errors)
         lines = block.splitlines()
-        starts = [index for index, line in enumerate(lines) if line.startswith("### ")]
+        starts = [index for index, line in enumerate(lines) if re.match(r"^#{1,6}\s+", line)]
         for position, start_index in enumerate(starts):
             end_index = starts[position + 1] if position + 1 < len(starts) else len(lines)
             heading = lines[start_index]
@@ -173,7 +173,7 @@ def _parse_lessons(text: str, errors: list[str]) -> dict[str, Lesson]:
 def _parse_standard_rules(text: str, errors: list[str]) -> dict[str, PromotedRule]:
     block, first_line = _marked_block(text, "PROMOTED_RULES", errors)
     lines = block.splitlines()
-    starts = [index for index, line in enumerate(lines) if line.startswith("##### ")]
+    starts = [index for index, line in enumerate(lines) if re.match(r"^#{1,6}\s+", line)]
     rules: dict[str, PromotedRule] = {}
     for position, start_index in enumerate(starts):
         end_index = starts[position + 1] if position + 1 < len(starts) else len(lines)

@@ -777,7 +777,7 @@ def _lesson_records(section: bytes, start_re: re.Pattern[bytes], end_re: re.Patt
         text = line.decode("utf-8", errors="strict").rstrip("\r\n")
         # Legacy records without a stable ID remain compatible, but any line
         # that claims to be an L-record must use the canonical heading shape.
-        if re.match(r"^#{3,}\s+L-", text):
+        if re.match(r"^[ \t]*#+[ \t]*L-", text):
             match = PROMOTION_HEADING.fullmatch(text)
             if match is None:
                 raise WriterError("Lessons contains a malformed Lesson heading")
@@ -804,38 +804,47 @@ def validate_global_lesson_uniqueness(active_section: bytes, promoted_section: b
                 raise WriterError(f"duplicate Lesson ID {lesson_id} across {previous} and {section_name} Lessons")
             locations[lesson_id] = f"{section_name} Lessons"
 
-def _evidence_rows(record: bytes, label: str) -> list[bytes]:
-    rows: list[bytes] = []
+def _evidence_row_indexes(record: bytes, label: str) -> list[int]:
+    indexes: list[int] = []
     in_evidence = False
     headers = 0
-    for line in record.splitlines(keepends=True):
+    for index, line in enumerate(record.splitlines(keepends=True)):
         plain = line.rstrip(b"\r\n")
-        if plain == b"- **Review evidence:**":
+        if plain.strip() == b"- **Review evidence:**":
             headers += 1
             if headers > 1:
                 raise WriterError(f"{label} contains duplicate Review evidence headers")
             in_evidence = True
             continue
-        if in_evidence and plain.startswith(b"- **"):
+        if in_evidence and re.match(rb"^- \*\*[^*]+:\*\*", plain):
             in_evidence = False
-        if in_evidence and plain.strip() and not plain.startswith(b"  - "):
-            raise WriterError(f"{label} contains malformed Review evidence row")
-        if in_evidence and plain.startswith(b"  - "):
-            match = re.fullmatch(rb"  - `([0-9]{4}-[0-9]{2}-[0-9]{2})` \xe2\x80\x94 \[[^\]]+\]\([^\)]+\)", plain)
+        if in_evidence and plain.strip():
+            # Match the persisted validator's date + citation-text language.
+            match = re.fullmatch(r"\s{2,}- `([0-9]{4}-[0-9]{2}-[0-9]{2})` — (.+?)\s*", plain.decode("utf-8"))
             if match is None:
                 raise WriterError(f"{label} contains malformed Review evidence row")
             try:
-                date.fromisoformat(match.group(1).decode("ascii"))
+                date.fromisoformat(match.group(1))
             except ValueError as exc:
                 raise WriterError(f"{label} contains an invalid Review evidence date") from exc
-            rows.append(line)
+            links = re.findall(r"\[[^\]]+\]\(([^)]+)\)", match.group(2))
+            if not links or any(not link.strip() or "<" in link or ">" in link for link in links):
+                raise WriterError(f"{label} evidence row requires a non-placeholder Markdown link")
+            indexes.append(index)
     if headers != 1:
         raise WriterError(f"{label} must contain exactly one Review evidence section")
-    return rows
+    if not indexes:
+        raise WriterError(f"{label} must contain at least one Review evidence row")
+    return indexes
+
+
+def _evidence_rows(record: bytes, label: str) -> list[bytes]:
+    lines = record.splitlines(keepends=True)
+    return [lines[index] for index in _evidence_row_indexes(record, label)]
 
 def _body_without_evidence(record: bytes, label: str) -> bytes:
-    rows = set(_evidence_rows(record, label))
-    kept = [line for line in record.splitlines(keepends=True) if line not in rows]
+    indexes = set(_evidence_row_indexes(record, label))
+    kept = [line for index, line in enumerate(record.splitlines(keepends=True)) if index not in indexes]
     while kept and not kept[-1].strip():
         kept.pop()
     return b"".join(kept).rstrip(b"\r\n")
@@ -875,9 +884,9 @@ def merge_existing_lesson_evidence(section: bytes, body: bytes, key: str) -> byt
                 seen.add(row)
                 union.append(row)
         old_lines = old.splitlines(keepends=True)
-        header = next(i for i, line in enumerate(old_lines) if line.rstrip(b"\r\n") == b"- **Review evidence:**")
-        old_lines = [line for line in old_lines if line not in old_rows]
-        header = next(i for i, line in enumerate(old_lines) if line.rstrip(b"\r\n") == b"- **Review evidence:**")
+        old_indexes = set(_evidence_row_indexes(old, "existing Lesson"))
+        old_lines = [line for index, line in enumerate(old_lines) if index not in old_indexes]
+        header = next(i for i, line in enumerate(old_lines) if line.strip() == b"- **Review evidence:**")
         old_lines[header + 1:header + 1] = union
         replacements[lesson_id] = b"".join(old_lines)
     if not replacements:

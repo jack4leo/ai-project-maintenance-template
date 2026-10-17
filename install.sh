@@ -47,8 +47,10 @@ SCRIPT_DIR="$(dirname "$INSTALLER_PATH")"
 # is never mistaken for this template installer.
 if [[ "$(basename "${BASH_SOURCE[0]}")" == "flywheel-install.sh" ]]; then
   SOURCE_DIR="$(cd "$SCRIPT_DIR/.." && pwd -P)"
+  LOCAL_ENTRY=1
 else
   SOURCE_DIR="$SCRIPT_DIR"
+  LOCAL_ENTRY=0
 fi
 ORIGINAL_ARGS=("$@")
 TARGET_DIR="$PWD"
@@ -95,6 +97,11 @@ esac
 
 [[ -d "$TARGET_DIR" ]] || { echo "ERROR: target directory does not exist: $TARGET_DIR" >&2; exit 2; }
 TARGET_DIR="$(cd "$TARGET_DIR" && pwd -P)"
+if [[ "$LOCAL_ENTRY" == 1 && "$TARGET_DIR" != "$SOURCE_DIR" ]]; then
+  echo "ERROR: the project-local .agent-maintenance/flywheel-install.sh only supports its own project root." >&2
+  echo "       Use a fixed-version independent checkout: /abs/source/install.sh --target $TARGET_DIR" >&2
+  exit 2
+fi
 [[ -f "$SOURCE_DIR/prompts/bootstrap-project.md" ]] || {
   echo "ERROR: run this installer from a Self-Evolution Flywheel checkout/template copy." >&2
   exit 2
@@ -139,7 +146,13 @@ files=(
   AGENTS.md
   CLAUDE.md
   LESSONS.md
-  install.sh
+)
+if [[ "$LOCAL_ENTRY" == 0 ]]; then
+  # A project may own install.sh as business code. The dedicated local entry
+  # must not require, enumerate, or copy that file as its own source.
+  files+=(install.sh)
+fi
+files+=(
   .agent-maintenance/session-start.sh
   .agent-maintenance/installer-transaction.py
   .github/PULL_REQUEST_TEMPLATE.md
@@ -796,7 +809,6 @@ if [[ -e "$template_entry" || -L "$template_entry" ]]; then
   fi
 else
   python3 "$TRANSACTION_HELPER" copy "$TARGET_DIR" ".agent-maintenance/flywheel-install.sh" "$INSTALLER_PATH" "$transaction_state" >/dev/null
-  chmod --reference="$INSTALLER_PATH" "$template_entry"
   echo "INSTALLED .agent-maintenance/flywheel-install.sh"
 fi
 

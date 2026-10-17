@@ -1058,6 +1058,34 @@ else
   fail "business installer fixture was unexpectedly changed"
 fi
 
+# The dedicated local entry is not a self-repair source: deleting the installed
+# business install.sh must not make it enumerate or copy that file, while using
+# it for another target must fail with guidance to an independent checkout.
+local_source_target="$TMP_DIR/local-source-target"
+mkdir -p "$local_source_target"
+bash "$REPO_ROOT/install.sh" --target "$local_source_target" --no-hooks \
+  > "$TMP_DIR/local-source-first.log" 2>&1
+rm -f "$local_source_target/install.sh"
+(cd "$local_source_target" && bash .agent-maintenance/flywheel-install.sh --no-hooks \
+  > "$TMP_DIR/local-source-second.log" 2>&1) \
+  || fail "dedicated local entry treated missing business install.sh as its source"
+! grep -Fq 'missing installer source file: install.sh' "$TMP_DIR/local-source-second.log" \
+  || fail "local entry still required the target business install.sh"
+[[ ! -e "$local_source_target/install.sh" ]] \
+  || fail "local entry copied or recreated the target business install.sh"
+local_elsewhere_target="$TMP_DIR/local-source-elsewhere"
+mkdir -p "$local_elsewhere_target"
+if bash "$local_source_target/.agent-maintenance/flywheel-install.sh" \
+    --target "$local_elsewhere_target" --no-hooks > "$TMP_DIR/local-source-elsewhere.log" 2>&1; then
+  fail "dedicated local entry accepted a different target root"
+fi
+grep -Fq 'only supports its own project root' "$TMP_DIR/local-source-elsewhere.log" \
+  || fail "cross-target local entry error was not explicit"
+grep -Fq '/abs/source/install.sh --target' "$TMP_DIR/local-source-elsewhere.log" \
+  || fail "cross-target local entry did not guide an independent source checkout"
+[[ ! -e "$local_elsewhere_target/AGENTS.md" ]] \
+  || fail "cross-target local entry published files before rejection"
+
 # F2: lstat rejects a FIFO before any template publication; installation must
 # finish promptly rather than entering cmp and blocking on the pipe.
 fifo_target="$TMP_DIR/fifo-target"

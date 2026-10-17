@@ -4,7 +4,7 @@ This template repository is named **self-evolution-flywheel**. The installer cop
 
 ## Usage
 
-A copy created with GitHub **Use this template** already contains the documentation, prompts, and project-level hook configuration. To install into an existing repository, or to perform an idempotent configuration check/repair, run the template checkout's `./install.sh` from the target repository root:
+A copy created with GitHub **Use this template** already contains the documentation, prompts, and project-level hook configuration. To install into an existing repository, run a fixed-version template checkout's `./install.sh`:
 
 ```bash
 ./install.sh
@@ -26,7 +26,7 @@ To start Codex Bootstrap immediately after installation (rather than only instal
 curl -fsSL https://raw.githubusercontent.com/jack4leo/self-evolution-flywheel/main/install.sh | bash -s -- --bootstrap codex
 ```
 
-Without `--bootstrap`, no agent is started and no project source is modified automatically. A subsequent startup hook only gives a reminder; it does not tell the agent to interrupt the user's task or fill in project documentation. Start initialization explicitly with the local installer as described below. The target directory must already exist, and when hooks are enabled it must be the root of a Git repository. The installer also publishes the template entry as `./.agent-maintenance/flywheel-install.sh`; use that path for later bootstrap or repair runs in the target. The target's existing `./install.sh`, if any, is preserved as a business/project file and is never used as the template entry.
+Without `--bootstrap`, no agent is started and no project source is modified automatically. A subsequent startup hook only gives a reminder; it does not tell the agent to interrupt the user's task or fill in project documentation. Start initialization explicitly with the local installer as described below. The target directory must already exist, and when hooks are enabled it must be the root of a Git repository. The installer also publishes the template entry as `./.agent-maintenance/flywheel-install.sh`; use that path only for later bootstrap runs in the same target. The target's existing `./install.sh`, if any, is preserved as a business/project file and is never used as the template entry.
 
 If the template repository is cloned separately into another directory:
 
@@ -47,6 +47,16 @@ To explicitly start initialization now:
 The installation script requires Bash, Git, and Python 3 (for safely merging JSON settings); a GitHub Template project already includes the files and hook configuration. Windows users should run the script in WSL or a Unix-like environment that provides Bash/Git/Python.
 
 Use `--target DIR` to specify the target directory, or `--no-hooks` to copy files only without changing agent settings. The target directory must already exist; when hooks are enabled by default, the target must be the root of a Git repository. Non-Git directories are rejected; to install files only, explicitly use `--no-hooks`.
+
+### The project-local entry is not an independent source
+
+After installation, `.agent-maintenance/flywheel-install.sh` is a convenience entry for **this project root only**. It uses the files already installed in that project as its source; it cannot restore a deleted prompt, installer component, or other missing file from itself, and it cannot upgrade the project. It also does not require or copy the target project's business `install.sh`. If an installed file is missing or a newer version is needed, check out the desired fixed version into an independent source directory and run:
+
+```bash
+/abs/source/install.sh --target /abs/target
+```
+
+The project-local entry rejects `--target` pointing elsewhere so that an incomplete target cannot be mistaken for an independent template checkout. Do not describe this entry as a local “repair” or upgrade mechanism.
 
 ## Installation Contents and Overwrite Rules
 

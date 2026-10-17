@@ -7,7 +7,7 @@
 The caller must provide all of the following explicitly:
 
 - `--manifest`: the canonical UTF-8 JSON file emitted by the range freezer, including its single trailing newline;
-- `--archive`: an explicit repository-relative destination under `docs/reviews/` ending in `.md`;
+- `--archive`: a destination under the fixed `docs/reviews/` root ending in `.md`; only filename/date layout may vary beneath that root. Other roots require separate code design and are rejected; paths are opened without following symlinked directories;
 - `--archive-content`: UTF-8 review-record body prepared by the caller; and
 - `--lessons-content`: UTF-8 Lesson entries prepared by the caller. An empty file records an empty, retryable Lessons block.
 - optionally, both `--promoted-lessons-content` and `--promoted-standards-content`: complete promoted Lesson records and corresponding `PS-` rules, prepared by the caller only after checking the promotion threshold and evidence. They must be supplied together; omitting both leaves promotion history and standards untouched.
@@ -22,7 +22,7 @@ For each range key, the writer upserts one delimited block in the archive and on
 
 The sequence is:
 
-1. Validate and lock the writer transaction; validate the manifest and existing watermark.
+1. Validate the manifest and existing watermark before creating the cooperative lock or any destination directory/file, then lock the writer transaction.
 2. Validate all requested destination sections and compute updates before the first write.
 3. Upsert the archive, then (if requested) `docs/code-standards.md`, then `LESSONS.md`, keeping the prior watermark. Before any destination write and immediately before the final watermark write, the proposed `LESSONS.md` must have globally unique Lesson IDs across the complete bounded `ACTIVE_LESSONS` and `PROMOTED_LESSONS` sections. Re-read/verify every requested range-key block and destination.
 4. Atomically replace `LESSONS.md` with the `reviewed-through` value set to the manifest's `through`. No file write follows this final write.
@@ -33,7 +33,7 @@ A failure before the final watermark replacement leaves the old marker in place;
 
 The writer uses directory file descriptors, `O_NOFOLLOW` for repository path traversal and file opens, a persistent advisory lock at the Git common directory, regular-file checks, staged same-directory replacement, and read-back checks. The lock file is intentionally retained (not cleaned up). A non-cooperative process with write access to a destination directory can still replace the staging pathname in the narrow interval between the final inode check and the pathname-based rename; the post-write check detects a different published inode but cannot guarantee that the destination was never briefly replaced or restore the old target after that race. If that check fails, inspect both the destination and retained temporary paths before retrying. Hardware/power-loss behavior and filesystems that do not honor expected atomic rename/fsync semantics are also environmental boundaries. The advisory lock coordinates only cooperating writers; it is not a defense against an actor able to mutate these directories concurrently.
 
-Lesson IDs and CI that counts appearances on at least three distinct review dates operate only on persisted `LESSONS.md` content. This writer neither calculates nor gates those values. It does not set a review date/time zone or choose an archive location; the caller supplies the archive path and all content. It does not infer or modify the reviewed-through starting point, change installer code, or change installer recovery behavior.
+Lesson IDs and CI that counts appearances on at least three distinct review dates operate only on persisted `LESSONS.md` content. This writer neither calculates nor gates those values. It does not set a review date/time zone or choose the filename/date layout under the fixed `docs/reviews` archive root; the caller supplies the archive path and all content. It does not infer or modify the reviewed-through starting point, change installer code, or change installer recovery behavior.
 
 If a later range supplies an existing Lesson ID, the writer merges only when the record body outside structured `Review evidence` rows is byte-for-byte identical; it unions exact evidence rows, retaining all old rows and deduplicating repeated rows. A changed rule title, Why, Fix, Status, or any other non-evidence content fails closed before the archive or watermark write, without semantic normalization or overwriting user edits. Existing IDs outside writer-managed range blocks are rejected rather than migrated. A colliding record must contain exactly one `Review evidence` section with valid ISO calendar dates and valid citation rows; malformed headings, missing sections, invalid dates, and malformed rows fail closed. The uniqueness scan covers the complete bounded `ACTIVE_LESSONS` and `PROMOTED_LESSONS` sections (including hand-written records), while templates outside those sections are ignored, and it is repeated over the complete proposed document immediately before watermark advancement. Promotion remains the compatible exception: the existing active record is removed and the same ID is written to that range's promoted block as one prevalidated update.
 

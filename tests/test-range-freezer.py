@@ -264,6 +264,8 @@ class FrozenRangeTests(unittest.TestCase):
             ("<!-- reviewed-through: UNKNOWN (bootstrap) -->\n# Lessons\n", "reviewed-through is UNKNOWN"),
             (f"<!-- reviewed-through: {self.anchor[:8]} -->\n# Lessons\n", "full 40-character"),
             (f"<!-- reviewed-through: {'f' * 40} -->\n# Lessons\n", "does not resolve"),
+            (f"prefix <!-- reviewed-through: {self.anchor} --> trailing\n# Lessons\n", "first line"),
+            (f"<!-- reviewed-through: {self.anchor} -->\r\n# Lessons\r\n", None),
             (
                 f"<!-- reviewed-through: {self.anchor} -->\n"
                 f"<!-- reviewed-through: {self.anchor} -->\n# Lessons\n",
@@ -273,7 +275,11 @@ class FrozenRangeTests(unittest.TestCase):
         for data, expected in cases:
             with self.subTest(watermark=data.splitlines()[0]):
                 lessons.write_text(data, encoding="utf-8")
-                self.assert_cli_failure(self.repo, expected)
+                if expected is None:
+                    completed = invoke(self.repo)
+                    self.assertEqual(completed.returncode, 0, completed.stderr.decode(errors="replace"))
+                else:
+                    self.assert_cli_failure(self.repo, expected)
         lessons.write_text(original, encoding="utf-8")
 
     def test_exclusions_are_explicit_and_rule_changes_affect_key(self) -> None:

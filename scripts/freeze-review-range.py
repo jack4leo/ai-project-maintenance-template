@@ -17,12 +17,14 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
+try:
+    from scripts.watermark import WatermarkError, parse_watermark
+except ModuleNotFoundError:  # direct execution as scripts/freeze-review-range.py
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from watermark import WatermarkError, parse_watermark
+
 
 POLICY_PATH = "docs/automation/range-exclusions.json"
-WATERMARK_MARKER = re.compile(rb"<!--\s*reviewed-through\s*:")
-WATERMARK_LINE = re.compile(
-    rb"^<!-- reviewed-through: ([^\s]+)(?:[ \t]+[^<>]*)? -->$"
-)
 RULE_ID = re.compile(r"^[a-z0-9][a-z0-9-]*$")
 VALID_DIFF_STATUS = {"A", "M", "D", "T", "U", "X", "B"}
 
@@ -188,20 +190,10 @@ def read_watermark(repo: Path, length: int) -> tuple[str, bytes, tuple[int, ...]
     except UnicodeDecodeError as exc:
         raise FreezeError("LESSONS.md is not valid UTF-8") from exc
 
-    markers = list(WATERMARK_MARKER.finditer(data))
-    if len(markers) != 1:
-        raise FreezeError(
-            "LESSONS.md must contain exactly one reviewed-through marker; "
-            f"found {len(markers)}"
-        )
-    first_line = data.splitlines()[0] if data.splitlines() else b""
-    match = WATERMARK_LINE.fullmatch(first_line)
-    if match is None:
-        raise FreezeError("the reviewed-through marker must be the first line of LESSONS.md")
     try:
-        raw_value = match.group(1).decode("ascii", errors="strict")
-    except UnicodeDecodeError as exc:
-        raise FreezeError("reviewed-through is not a hexadecimal object ID") from exc
+        raw_value, _, _ = parse_watermark(data)
+    except WatermarkError as exc:
+        raise FreezeError(str(exc)) from exc
     if raw_value == "UNKNOWN":
         raise FreezeError(
             "reviewed-through is UNKNOWN; stop and ask a maintainer to choose the first "

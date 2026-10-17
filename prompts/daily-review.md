@@ -1,9 +1,10 @@
 # Daily review of project changes
 
-Follow `AGENTS.md` and `docs/automation/runner-contract.md`. Do not calculate the range from `LESSONS.md` or the current branch yourself. Each invocation must allocate its own temporary directory; do not assume `TMPDIR` is set or share a fixed manifest path between invocations. The directory is removed after a successful run. If any command fails, the `EXIT` trap keeps it and prints its path for recovery/debugging; remove it manually after collecting the needed evidence:
+Follow `AGENTS.md` and `docs/automation/runner-contract.md`. Do not calculate the range from `LESSONS.md` or the current branch yourself. Run all snippets below in the same dedicated Bash script/process with `set -e`, not as separate shell invocations or in a long-lived interactive shell. Each invocation must allocate its own temporary directory; do not assume `TMPDIR` is set or share a fixed manifest path between invocations. The directory is removed after a successful run. If any command fails, the `EXIT` trap keeps it and prints its path for recovery/debugging; remove it manually after collecting the needed evidence:
 
 ```bash
-review_tmp_dir="$(mktemp -d)"
+set -e
+review_tmp_dir="$(mktemp -d)" || exit 1
 review_tmp_dir_cleanup() {
   status=$?
   if [ "$status" -eq 0 ]; then

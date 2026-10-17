@@ -13,6 +13,8 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+      - name: Validate review exclusion policy
+        run: python3 scripts/freeze-review-range.py --validate-policy docs/automation/range-exclusions.json
       - name: Run installer regression tests
         run: bash tests/test-install.sh
       - name: Test Lesson promotion validator

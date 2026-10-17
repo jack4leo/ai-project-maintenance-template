@@ -319,7 +319,7 @@ def parse_policy(content: bytes) -> tuple[int, list[dict[str, Any]]]:
     if not isinstance(policy, dict) or set(policy) != {"policy_version", "rules"}:
         raise FreezeError("exclusion policy must contain only policy_version and rules")
     policy_version = policy["policy_version"]
-    if type(policy_version) is not int or policy_version not in {1, 2}:
+    if type(policy_version) is not int or policy_version not in {1, 2, 3}:
         raise FreezeError("unsupported exclusion policy version")
     if not isinstance(policy["rules"], list):
         raise FreezeError("exclusion policy rules must be an array")
@@ -338,8 +338,10 @@ def parse_policy(content: bytes) -> tuple[int, list[dict[str, Any]]]:
             if kind == "path-prefix"
             else {"id", "kind", "reason"}
         )
-        if kind not in {"path-glob", "path-prefix", "binary-nul-byte", "gitlink"}:
+        if not isinstance(kind, str) or kind not in {"path-glob", "path-prefix", "binary-nul-byte", "gitlink"}:
             raise FreezeError(f"{where} has an unknown kind")
+        if kind == "path-prefix" and policy_version >= 3 and "producer" in raw_rule:
+            expected.add("producer")
         if kind == "path-prefix" and policy_version < 2:
             raise FreezeError(f"{where} path-prefix rules require exclusion policy version 2")
         if set(raw_rule) != expected:
@@ -375,6 +377,14 @@ def parse_policy(content: bytes) -> tuple[int, list[dict[str, Any]]]:
             for path in paths:
                 validate_explicit_path(path, where)
             normalized["paths"] = list(paths)
+            if policy_version >= 3:
+                if paths and "producer" not in raw_rule:
+                    raise FreezeError(f"{where} with paths must describe a concrete producer process")
+                if "producer" in raw_rule:
+                    producer = raw_rule["producer"]
+                    if not isinstance(producer, str) or not producer.strip():
+                        raise FreezeError(f"{where} producer must be a non-empty process description")
+                    normalized["producer"] = producer
         normalized["reason"] = reason
         rules.append(normalized)
     return policy_version, rules
@@ -762,14 +772,25 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description="Validate and emit a read-only frozen review-range manifest as canonical JSON."
     )
-    parser.add_argument(
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument(
         "--repo",
         type=Path,
         default=Path.cwd(),
         help="repository working-tree path (default: current directory)",
     )
+    mode.add_argument(
+        "--validate-policy",
+        type=Path,
+        metavar="PATH",
+        help="validate only an exclusion policy using the same parser; no Git history or watermark required",
+    )
     args = parser.parse_args(argv)
     try:
+        if args.validate_policy is not None:
+            content, _ = read_regular_file_noatime(args.validate_policy, "exclusion policy")
+            parse_policy(content)
+            return 0
         manifest = freeze_range(args.repo)
         sys.stdout.buffer.write(canonical_json(manifest) + b"\n")
         sys.stdout.buffer.flush()

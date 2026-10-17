@@ -293,6 +293,8 @@ class FrozenRangeTests(unittest.TestCase):
         self.assertIn("generated-output", by_path["dist/generated.js"])
         self.assertIn("binary-nul-content", by_path["image.bin"])
         self.assertIn("binary-nul-content", by_path["application.sqlite"])
+        generated_policy_rule = next(rule for rule in manifest["exclusion_policy"]["rules"] if rule["id"] == "generated-data-paths")
+        self.assertNotIn("producer", generated_policy_rule)
         self.assertEqual(manifest["exclusion_policy"]["source_path"], "docs/automation/range-exclusions.json")
         self.assertEqual(
             manifest["exclusion_policy"]["source_sha256"],
@@ -311,15 +313,21 @@ class FrozenRangeTests(unittest.TestCase):
 
     def test_default_generated_data_paths_are_empty_and_do_not_guess(self) -> None:
         policy_version, rules = FREEZER.parse_policy(POLICY_SOURCE.read_bytes())
-        self.assertEqual(policy_version, 2)
+        self.assertEqual(policy_version, 3)
         generated_rule = next(rule for rule in rules if rule["id"] == "generated-data-paths")
         self.assertEqual(generated_rule["paths"], [])
 
         snapshot = self.repo / "automation" / "pulls" / "daily-snapshot.json"
         snapshot.parent.mkdir(parents=True)
         snapshot.write_text('{"generated":true}\n', encoding="utf-8")
+        unconfigured = ["training/checkpoints/step-10.json", "etl/staging/batch.csv", "new-output/result.txt"]
+        for relative in unconfigured:
+            target = self.repo / relative
+            target.parent.mkdir(parents=True)
+            target.write_text("unconfigured data\n", encoding="utf-8")
         commit(self.repo, "add an unconfigured automation snapshot")
         manifest = FREEZER.freeze_range(self.repo)
+        self.assertTrue(set(unconfigured).isdisjoint(record["path"] for record in manifest["excluded_paths"]))
         self.assertNotIn(
             "automation/pulls/daily-snapshot.json",
             {record["path"] for record in manifest["excluded_paths"]},
@@ -330,6 +338,7 @@ class FrozenRangeTests(unittest.TestCase):
         policy = json.loads(policy_path.read_text(encoding="utf-8"))
         generated_rule = next(rule for rule in policy["rules"] if rule["id"] == "generated-data-paths")
         generated_rule["paths"] = ["automation/generated-data"]
+        generated_rule["producer"] = "ETL pipeline materializes daily snapshots"
         policy_path.write_text(json.dumps(policy, indent=2) + "\n", encoding="utf-8")
         commit(self.repo, "configure an explicit generated-data path")
 
@@ -339,9 +348,21 @@ class FrozenRangeTests(unittest.TestCase):
         sibling = self.repo / "automation" / "generated-data-archive" / "sibling.json"
         sibling.parent.mkdir(parents=True)
         sibling.write_text('{"keep":true}\n', encoding="utf-8")
+        nested = self.repo / "automation" / "generated-data" / "nested" / "generated-data" / "same-name.json"
+        nested.parent.mkdir(parents=True)
+        nested.write_text("nested\n", encoding="utf-8")
+        outside = self.repo / "other" / "automation" / "generated-data" / "same-name.json"
+        outside.parent.mkdir(parents=True)
+        outside.write_text("must remain reviewable\n", encoding="utf-8")
+        workflow = self.repo / ".github" / "workflows" / "produce.yml"
+        workflow.parent.mkdir(parents=True)
+        workflow.write_text("name: Producer\n", encoding="utf-8")
         code = self.repo / "src" / "workflow.py"
         code.parent.mkdir(parents=True)
         code.write_text("def run():\n    return True\n", encoding="utf-8")
+        config = self.repo / "config" / "review.toml"
+        config.parent.mkdir(parents=True)
+        config.write_text("enabled = true\n", encoding="utf-8")
         through = commit(self.repo, "update workflow and generated snapshot")
 
         manifest = FREEZER.freeze_range(self.repo)
@@ -354,12 +375,24 @@ class FrozenRangeTests(unittest.TestCase):
         self.assertEqual(len(excluded), 1)
         self.assertEqual(excluded[0]["rule_id"], "generated-data-paths")
         self.assertEqual(excluded[0]["match"], {"path_prefix": "automation/generated-data"})
+        self.assertEqual(excluded[0]["reason"], generated_rule["reason"])
+        self.assertTrue({outside.relative_to(self.repo).as_posix(), workflow.relative_to(self.repo).as_posix()}.isdisjoint(
+            record["path"] for record in manifest["excluded_paths"] if record["commit"] == through
+        ))
+        self.assertIn(
+            "automation/generated-data/nested/generated-data/same-name.json",
+            {record["path"] for record in manifest["excluded_paths"] if record["commit"] == through},
+        )
+        self.assertNotIn(
+            "automation/generated-data-archive/sibling.json",
+            {record["path"] for record in manifest["excluded_paths"] if record["commit"] == through},
+        )
         self.assertNotIn(
             "src/workflow.py",
             {record["path"] for record in manifest["excluded_paths"] if record["commit"] == through},
         )
         self.assertNotIn(
-            "automation/generated-data-archive/sibling.json",
+            "config/review.toml",
             {record["path"] for record in manifest["excluded_paths"] if record["commit"] == through},
         )
 
@@ -395,6 +428,130 @@ class FrozenRangeTests(unittest.TestCase):
         }
         with self.assertRaisesRegex(FREEZER.FreezeError, "wildcard characters are not allowed"):
             FREEZER.parse_policy(json.dumps(invalid).encode("utf-8"))
+
+    def test_v3_producers_are_free_text_and_normalized_into_manifest_rules(self) -> None:
+        producers = ["training job", "stage-2 materializer", "ETL flow", "runtime cache warmer", "new process type"]
+        for producer in producers:
+            with self.subTest(producer=producer):
+                version, rules = FREEZER.parse_policy(json.dumps({
+                    "policy_version": 3,
+                    "rules": [{"id": "generated-data-paths", "kind": "path-prefix",
+                               "paths": ["outputs/model"], "producer": producer, "reason": "fixture reason"}],
+                }).encode())
+                self.assertEqual(version, 3)
+                self.assertEqual(rules[0]["producer"], producer)
+        _, empty_rules = FREEZER.parse_policy(json.dumps({
+            "policy_version": 3,
+            "rules": [{"id": "generated-data-paths", "kind": "path-prefix", "paths": [], "reason": "no paths configured"}],
+        }).encode())
+        self.assertNotIn("producer", empty_rules[0])
+
+    def test_v2_populated_prefix_remains_compatible_without_invented_producer(self) -> None:
+        policy = {"policy_version": 2, "rules": [{
+            "id": "legacy-data", "kind": "path-prefix", "paths": ["legacy/output"], "reason": "legacy decision",
+        }]}
+        self.assertEqual(FREEZER.parse_policy(json.dumps(policy).encode()), (2, policy["rules"]))
+        policy["rules"][0]["producer"] = "not part of the legacy schema"
+        with self.assertRaisesRegex(FREEZER.FreezeError, "unexpected"):
+            FREEZER.parse_policy(json.dumps(policy).encode())
+
+    def test_v3_exact_file_prefix_and_unused_producer_bind_range_key(self) -> None:
+        policy_path = self.repo / "docs/automation/range-exclusions.json"
+        policy = {"policy_version": 3, "rules": [{
+            "id": "training-output", "kind": "path-prefix", "paths": ["training/checkpoint.json"],
+            "producer": "train.py writes a checkpoint at the end of each epoch", "reason": "skip only checkpoint data",
+        }, {
+            "id": "future-process", "kind": "path-prefix", "paths": [],
+            "producer": "reserved stage-3 materializer; no paths approved", "reason": "no exclusions yet",
+        }]}
+        policy_path.write_text(json.dumps(policy), encoding="utf-8")
+        for relative in ("training/checkpoint.json", "training/checkpoint.json.bak", "other/training/checkpoint.json"):
+            target = self.repo / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text("data\n", encoding="utf-8")
+        through = commit(self.repo, "add explicitly selected training artifact and siblings")
+        manifest = FREEZER.freeze_range(self.repo)
+        self.assertIn(through, {item["sha"] for item in manifest["commits"]})
+        self.assertEqual([item["path"] for item in manifest["excluded_paths"]], ["training/checkpoint.json"])
+        self.assertEqual(manifest["exclusion_policy"]["rules"], policy["rules"])
+        self.assertEqual(manifest["excluded_paths"][0]["reason"], "skip only checkpoint data")
+        for index in (0, 1):
+            altered = json.loads(json.dumps(manifest))
+            altered["exclusion_policy"]["rules"][index]["producer"] += " revised source"
+            payload = {key: value for key, value in altered.items() if key != "range_key"}
+            self.assertNotEqual(FREEZER.add_range_key(payload)["range_key"], manifest["range_key"])
+
+    def test_documented_v3_example_uses_the_real_parser(self) -> None:
+        contract = (REPO_ROOT / "docs/automation/runner-contract.md").read_text(encoding="utf-8")
+        example = contract.split("```json\n", 1)[1].split("```", 1)[0]
+        version, rules = FREEZER.parse_policy(example.encode("utf-8"))
+        self.assertEqual(version, 3)
+        self.assertTrue(all(rule["producer"].strip() for rule in rules))
+
+    def test_v3_policy_rejects_invalid_producer_and_extra_field_shapes(self) -> None:
+        cases = [
+            ({"id": "r", "kind": "path-prefix", "paths": ["out"], "reason": "why"}, "producer"),
+            ({"id": "r", "kind": "path-prefix", "paths": ["out"], "producer": "", "reason": "why"}, "producer"),
+            ({"id": "r", "kind": "path-prefix", "paths": ["out"], "producer": 7, "reason": "why"}, "producer"),
+            ({"id": "r", "kind": "path-glob", "patterns": ["out/**"], "producer": "tool", "reason": "why"}, "unexpected"),
+            ({"id": "r", "kind": "binary-nul-byte", "producer": "tool", "reason": "why"}, "unexpected"),
+        ]
+        for paths in ([], ["out"]):
+            for producer in (None, "   ", [], {}):
+                cases.append(({"id": "r", "kind": "path-prefix", "paths": paths, "producer": producer, "reason": "why"}, "producer"))
+        for rule, message in cases:
+            with self.subTest(rule=rule):
+                with self.assertRaisesRegex(FREEZER.FreezeError, message):
+                    FREEZER.parse_policy(json.dumps({"policy_version": 3, "rules": [rule]}).encode())
+
+    def test_v3_path_and_reason_boundary_matrix_is_rejected(self) -> None:
+        invalid_paths = ["", "/absolute", "../parent", "a/../b", "a/./b", "a//b", "a/", "a\\b", "a\x00b", "a*b", "a?b"]
+        for path in invalid_paths:
+            with self.subTest(path=repr(path)):
+                rule = {"id": "r", "kind": "path-prefix", "paths": [path], "producer": "process", "reason": "why"}
+                with self.assertRaises(FREEZER.FreezeError):
+                    FREEZER.parse_policy(json.dumps({"policy_version": 3, "rules": [rule]}).encode())
+        duplicate = {"id": "r", "kind": "path-prefix", "paths": ["out", "out"], "producer": "process", "reason": "why"}
+        with self.assertRaises(FREEZER.FreezeError):
+            FREEZER.parse_policy(json.dumps({"policy_version": 3, "rules": [duplicate]}).encode())
+        for reason in (None, "", "   ", 4):
+            with self.subTest(reason=repr(reason)):
+                rule = {"id": "r", "kind": "path-prefix", "paths": [], "reason": reason}
+                with self.assertRaises(FREEZER.FreezeError):
+                    FREEZER.parse_policy(json.dumps({"policy_version": 3, "rules": [rule]}).encode())
+        with self.assertRaisesRegex(FREEZER.FreezeError, "missing fields"):
+            FREEZER.parse_policy(b'{"policy_version":3,"rules":[{"id":"r","kind":"path-prefix","paths":[]}]}')
+        for kind in ([], {}):
+            with self.subTest(kind=repr(kind)):
+                rule = {"id": "r", "kind": kind, "reason": "why"}
+                with self.assertRaises(FREEZER.FreezeError):
+                    FREEZER.parse_policy(json.dumps({"policy_version": 3, "rules": [rule]}).encode())
+        for raw in (
+            '{"policy_version":3,"rules":[],"rules":[]}',
+            '{"policy_version":true,"rules":[]}',
+            '{"policy_version":3,"rules": [{"id":"r","kind":"path-prefix","paths":[],"reason":"why","extra":1}]}',
+        ):
+            with self.subTest(raw=raw):
+                with self.assertRaises(FREEZER.FreezeError):
+                    FREEZER.parse_policy(raw.encode())
+
+    def test_validate_policy_cli_is_git_independent_and_silent(self) -> None:
+        policy = self.temp_path / "standalone-policy.json"
+        policy.write_text(json.dumps({"policy_version": 3, "rules": [{"id": "r", "kind": "path-prefix", "paths": [], "reason": "fixture"}]}), encoding="utf-8")
+        good = subprocess.run([sys.executable, str(RUNNER), "--validate-policy", str(policy)], stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+        self.assertEqual(good.returncode, 0, good.stderr.decode())
+        self.assertEqual(good.stdout, b"")
+        malformed = policy.read_bytes()
+        policy.write_text('{"policy_version":3,"rules":[{"id":"r","kind":"path-prefix","paths":["out"],"reason":"missing producer"}]}', encoding="utf-8")
+        before_bad = policy.read_bytes()
+        bad = subprocess.run([sys.executable, str(RUNNER), "--validate-policy", str(policy)], stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+        self.assertNotEqual(bad.returncode, 0)
+        self.assertEqual(bad.stdout, b"")
+        self.assertEqual(policy.read_bytes(), before_bad)
+        self.assertNotEqual(before_bad, malformed)
+        conflict = subprocess.run([sys.executable, str(RUNNER), "--repo", str(self.repo), "--validate-policy", str(policy)], stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+        self.assertNotEqual(conflict.returncode, 0)
+        self.assertEqual(conflict.stdout, b"")
 
     def test_binary_deletion_checks_old_blob_across_chunk_boundary(self) -> None:
         binary = self.repo / "large.bin"

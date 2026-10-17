@@ -86,6 +86,19 @@ def _valid_policy_glob(pattern: str) -> bool:
     )
 
 
+def _valid_explicit_path(path: Any) -> bool:
+    return (
+        isinstance(path, str)
+        and bool(path)
+        and not path.startswith("/")
+        and not path.endswith("/")
+        and "\\" not in path
+        and "\x00" not in path
+        and not any(part in {"", ".", ".."} for part in path.split("/"))
+        and not any("*" in part or "?" in part for part in path.split("/"))
+    )
+
+
 def validate_manifest_nested(value: dict[str, Any], oid_length: int) -> None:
     commits = value["commits"]
     if not isinstance(commits, list):
@@ -118,7 +131,8 @@ def validate_manifest_nested(value: dict[str, Any], oid_length: int) -> None:
         raise WriterError("manifest exclusion policy has unexpected or missing fields")
     if policy["source_path"] != POLICY_PATH:
         raise WriterError("manifest exclusion policy source path is invalid")
-    if type(policy["policy_version"]) is not int or policy["policy_version"] != 1:
+    policy_version = policy["policy_version"]
+    if type(policy_version) is not int or policy_version not in {1, 2}:
         raise WriterError("manifest exclusion policy version is unsupported")
     if not _is_object_id(policy["source_commit"], oid_length) or not _is_object_id(policy["source_blob"], oid_length):
         raise WriterError("manifest exclusion policy source IDs are malformed")
@@ -134,11 +148,19 @@ def validate_manifest_nested(value: dict[str, Any], oid_length: int) -> None:
         if not isinstance(rule, dict):
             raise WriterError("manifest exclusion policy rule must be an object")
         kind = rule.get("kind")
-        if not isinstance(kind, str) or kind not in {"path-glob", "binary-nul-byte", "gitlink"}:
+        if not isinstance(kind, str) or kind not in {"path-glob", "path-prefix", "binary-nul-byte", "gitlink"}:
             raise WriterError("manifest exclusion policy rule has an unknown kind")
-        expected = {"id", "kind", "patterns", "reason"} if kind == "path-glob" else {"id", "kind", "reason"}
+        expected = (
+            {"id", "kind", "patterns", "reason"}
+            if kind == "path-glob"
+            else {"id", "kind", "paths", "reason"}
+            if kind == "path-prefix"
+            else {"id", "kind", "reason"}
+        )
         if set(rule) != expected:
             raise WriterError("manifest exclusion policy rule has unexpected or missing fields")
+        if kind == "path-prefix" and policy_version < 2:
+            raise WriterError("manifest path-prefix rules require exclusion policy version 2")
         rule_id, reason = rule["id"], rule["reason"]
         if not isinstance(rule_id, str) or not RULE_ID.fullmatch(rule_id) or rule_id in rules_by_id:
             raise WriterError("manifest exclusion policy contains an invalid or duplicate rule ID")
@@ -153,6 +175,14 @@ def validate_manifest_nested(value: dict[str, Any], oid_length: int) -> None:
                 or len(set(patterns)) != len(patterns)
             ):
                 raise WriterError("manifest exclusion policy path-glob patterns are malformed")
+        elif kind == "path-prefix":
+            paths = rule["paths"]
+            if (
+                not isinstance(paths, list)
+                or any(not _valid_explicit_path(path) for path in paths)
+                or len(set(paths)) != len(paths)
+            ):
+                raise WriterError("manifest exclusion policy path-prefix paths are malformed")
         rules_by_id[rule_id] = rule
 
     excluded_paths = value["excluded_paths"]
@@ -213,6 +243,14 @@ def validate_manifest_nested(value: dict[str, Any], oid_length: int) -> None:
         if set(match) == {"pattern"}:
             if rule["kind"] != "path-glob" or match["pattern"] not in rule["patterns"]:
                 raise WriterError("excluded-path pattern does not match its policy rule")
+        elif set(match) == {"path_prefix"}:
+            prefix = match["path_prefix"]
+            if (
+                rule["kind"] != "path-prefix"
+                or prefix not in rule["paths"]
+                or not (path == prefix or path.startswith(prefix + "/"))
+            ):
+                raise WriterError("excluded-path prefix does not match its policy rule")
         elif set(match) == {"classification"}:
             classification = match["classification"]
             if (
@@ -524,7 +562,12 @@ def marker_value(lessons: bytes) -> tuple[str, int, int]:
     except UnicodeDecodeError as exc:
         raise WriterError("reviewed-through marker is not ASCII") from exc
     if value == "UNKNOWN":
-        raise WriterError("reviewed-through is UNKNOWN; refusing to choose or establish a starting point")
+        raise WriterError(
+            "reviewed-through is UNKNOWN; ask a maintainer to choose the first target-branch "
+            "commit to include and confirm its target-branch parent as the exclusive boundary; "
+            "do not infer or initialize that starting boundary here. If there is no target-branch "
+            "parent, stop for an explicit baseline design decision"
+        )
     if len(value) not in (40, 64) or not OBJECT_ID.fullmatch(value):
         raise WriterError("reviewed-through must be a full lowercase hexadecimal object ID")
     return value, match.start(1), match.end(1)

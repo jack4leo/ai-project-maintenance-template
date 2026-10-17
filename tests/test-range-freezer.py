@@ -261,7 +261,7 @@ class FrozenRangeTests(unittest.TestCase):
         cases = [
             ("<!-- no watermark -->\n# Lessons\n", "exactly one"),
             ("<!-- reviewed-through:  -->\n# Lessons\n", "first line"),
-            ("<!-- reviewed-through: UNKNOWN (bootstrap) -->\n# Lessons\n", "full 40-character"),
+            ("<!-- reviewed-through: UNKNOWN (bootstrap) -->\n# Lessons\n", "reviewed-through is UNKNOWN"),
             (f"<!-- reviewed-through: {self.anchor[:8]} -->\n# Lessons\n", "full 40-character"),
             (f"<!-- reviewed-through: {'f' * 40} -->\n# Lessons\n", "does not resolve"),
             (
@@ -308,6 +308,93 @@ class FrozenRangeTests(unittest.TestCase):
             FREEZER.add_range_key(altered)["range_key"],
             "the range key must bind exclusion-policy content even with identical boundaries and commits",
         )
+
+    def test_default_generated_data_paths_are_empty_and_do_not_guess(self) -> None:
+        policy_version, rules = FREEZER.parse_policy(POLICY_SOURCE.read_bytes())
+        self.assertEqual(policy_version, 2)
+        generated_rule = next(rule for rule in rules if rule["id"] == "generated-data-paths")
+        self.assertEqual(generated_rule["paths"], [])
+
+        snapshot = self.repo / "automation" / "pulls" / "daily-snapshot.json"
+        snapshot.parent.mkdir(parents=True)
+        snapshot.write_text('{"generated":true}\n', encoding="utf-8")
+        commit(self.repo, "add an unconfigured automation snapshot")
+        manifest = FREEZER.freeze_range(self.repo)
+        self.assertNotIn(
+            "automation/pulls/daily-snapshot.json",
+            {record["path"] for record in manifest["excluded_paths"]},
+        )
+
+    def test_explicit_generated_data_prefix_skips_only_that_path_and_keeps_mixed_commit(self) -> None:
+        policy_path = self.repo / "docs" / "automation" / "range-exclusions.json"
+        policy = json.loads(policy_path.read_text(encoding="utf-8"))
+        generated_rule = next(rule for rule in policy["rules"] if rule["id"] == "generated-data-paths")
+        generated_rule["paths"] = ["automation/generated-data"]
+        policy_path.write_text(json.dumps(policy, indent=2) + "\n", encoding="utf-8")
+        commit(self.repo, "configure an explicit generated-data path")
+
+        snapshot = self.repo / "automation" / "generated-data" / "snapshot.json"
+        snapshot.parent.mkdir(parents=True)
+        snapshot.write_text('{"count":7}\n', encoding="utf-8")
+        sibling = self.repo / "automation" / "generated-data-archive" / "sibling.json"
+        sibling.parent.mkdir(parents=True)
+        sibling.write_text('{"keep":true}\n', encoding="utf-8")
+        code = self.repo / "src" / "workflow.py"
+        code.parent.mkdir(parents=True)
+        code.write_text("def run():\n    return True\n", encoding="utf-8")
+        through = commit(self.repo, "update workflow and generated snapshot")
+
+        manifest = FREEZER.freeze_range(self.repo)
+        self.assertIn(through, {item["sha"] for item in manifest["commits"]})
+        excluded = [
+            record
+            for record in manifest["excluded_paths"]
+            if record["commit"] == through and record["path"] == "automation/generated-data/snapshot.json"
+        ]
+        self.assertEqual(len(excluded), 1)
+        self.assertEqual(excluded[0]["rule_id"], "generated-data-paths")
+        self.assertEqual(excluded[0]["match"], {"path_prefix": "automation/generated-data"})
+        self.assertNotIn(
+            "src/workflow.py",
+            {record["path"] for record in manifest["excluded_paths"] if record["commit"] == through},
+        )
+        self.assertNotIn(
+            "automation/generated-data-archive/sibling.json",
+            {record["path"] for record in manifest["excluded_paths"] if record["commit"] == through},
+        )
+
+    def test_explicit_path_prefix_rejects_wildcards_and_v1_remains_supported(self) -> None:
+        version, rules = FREEZER.parse_policy(
+            json.dumps(
+                {
+                    "policy_version": 1,
+                    "rules": [
+                        {
+                            "id": "legacy-glob",
+                            "kind": "path-glob",
+                            "patterns": ["docs/reviews/**"],
+                            "reason": "legacy schema fixture",
+                        }
+                    ],
+                }
+            ).encode("utf-8")
+        )
+        self.assertEqual(version, 1)
+        self.assertEqual(rules[0]["kind"], "path-glob")
+
+        invalid = {
+            "policy_version": 2,
+            "rules": [
+                {
+                    "id": "generated-data-paths",
+                    "kind": "path-prefix",
+                    "paths": ["automation/**"],
+                    "reason": "wildcards are not explicit paths",
+                }
+            ],
+        }
+        with self.assertRaisesRegex(FREEZER.FreezeError, "wildcard characters are not allowed"):
+            FREEZER.parse_policy(json.dumps(invalid).encode("utf-8"))
 
     def test_binary_deletion_checks_old_blob_across_chunk_boundary(self) -> None:
         binary = self.repo / "large.bin"
@@ -369,7 +456,7 @@ class FrozenRangeTests(unittest.TestCase):
         self.assertEqual(parsed["excluded_paths"], [])
         self.assertEqual(
             {rule["id"] for rule in parsed["exclusion_policy"]["rules"]},
-            {"generated-output", "binary-nul-content", "gitlink-submodule"},
+            {"generated-output", "generated-data-paths", "binary-nul-content", "gitlink-submodule"},
         )
 
     def test_dirty_worktree_policy_fails_closed(self) -> None:
@@ -478,7 +565,8 @@ class FrozenRangeTests(unittest.TestCase):
     def test_failure_does_not_emit_partial_manifest(self) -> None:
         lessons = self.repo / "LESSONS.md"
         lessons.write_text("<!-- reviewed-through: UNKNOWN -->\n# Lessons\n", encoding="utf-8")
-        self.assert_cli_failure(self.repo, "full 40-character")
+        self.assert_cli_failure(self.repo, "ask a maintainer to choose the first target-branch commit")
+        self.assertEqual(lessons.read_text(encoding="utf-8").splitlines()[0], "<!-- reviewed-through: UNKNOWN -->")
 
 
 if __name__ == "__main__":

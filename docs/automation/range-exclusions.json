@@ -1,5 +1,5 @@
 {
-  "policy_version": 1,
+  "policy_version": 2,
   "rules": [
     {
       "id": "generated-output",
@@ -13,6 +13,12 @@
         "**/node_modules/**"
       ],
       "reason": "Exclude conventional cache, build, coverage, distribution, generated-source, and installed-dependency trees from retrospective path review; the exact matched paths are recorded in the manifest."
+    },
+    {
+      "id": "generated-data-paths",
+      "kind": "path-prefix",
+      "paths": [],
+      "reason": "Exclude generated data content only beneath repository-relative file or directory paths explicitly listed by a maintainer; an empty list adds no project-specific generated-data exclusions."
     },
     {
       "id": "binary-nul-content",

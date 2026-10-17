@@ -281,15 +281,18 @@ class FrozenRangeTests(unittest.TestCase):
         generated.parent.mkdir()
         generated.write_text("generated output\n", encoding="utf-8")
         (self.repo / "image.bin").write_bytes(b"\x89PNG\x00binary\x01")
+        (self.repo / "application.sqlite").write_bytes(b"SQLite format 3\x00" + b"\x01\x00" * 32)
         through = commit(self.repo, "add generated and binary files")
 
         manifest = FREEZER.freeze_range(self.repo)
         self.assertEqual(manifest["through"], through)
+        self.assertIn(through, {item["sha"] for item in manifest["commits"]})
         by_path: dict[str, set[str]] = {}
         for item in manifest["excluded_paths"]:
             by_path.setdefault(item["path"], set()).add(item["rule_id"])
         self.assertIn("generated-output", by_path["dist/generated.js"])
         self.assertIn("binary-nul-content", by_path["image.bin"])
+        self.assertIn("binary-nul-content", by_path["application.sqlite"])
         self.assertEqual(manifest["exclusion_policy"]["source_path"], "docs/automation/range-exclusions.json")
         self.assertEqual(
             manifest["exclusion_policy"]["source_sha256"],

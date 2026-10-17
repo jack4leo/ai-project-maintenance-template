@@ -135,7 +135,11 @@ files=(
   .agent-maintenance/session-start.sh
   .agent-maintenance/installer-transaction.py
   .github/PULL_REQUEST_TEMPLATE.md
+  .github/workflows/lesson-promotion-gate.yml
 )
+while IFS= read -r -d '' source_path; do
+  files+=("${source_path#"$SOURCE_DIR"/}")
+done < <(find "$SOURCE_DIR/scripts" -type f ! -path '*/__pycache__/*' ! -name '*.pyc' -print0)
 while IFS= read -r -d '' source_path; do
   files+=("${source_path#"$SOURCE_DIR"/}")
 done < <(find "$SOURCE_DIR/docs" "$SOURCE_DIR/prompts" -type f \
@@ -247,8 +251,11 @@ try:
                 )
         handle, opened = open_checked_settings(filename, info)
         try:
-            for name in os.listxattr(handle.fileno()):
-                os.getxattr(handle.fileno(), name)
+            listxattr = getattr(os, "listxattr", None)
+            getxattr = getattr(os, "getxattr", None)
+            if listxattr is not None and getxattr is not None:
+                for name in listxattr(handle.fileno()):
+                    getxattr(handle.fileno(), name)
             try:
                 config = json.load(handle)
             finally:

@@ -1070,6 +1070,40 @@ timeout 10 bash "$REPO_ROOT/install.sh" --target "$fifo_target" --no-hooks \
 grep -Fq 'not a regular file' "$TMP_DIR/fifo.log" || fail "FIFO rejection was not reported"
 [[ ! -e "$fifo_target/AGENTS.md" ]] || fail "FIFO preflight published files before rejection"
 
+# Mismatched dedicated entry is detected before publication and cannot bootstrap.
+unsafe_entry_target="$TMP_DIR/unsafe-entry-target"
+mkdir -p "$unsafe_entry_target/.agent-maintenance"
+printf '#!/usr/bin/env bash\necho untrusted-entry\n' > "$unsafe_entry_target/.agent-maintenance/flywheel-install.sh"
+if bash "$REPO_ROOT/install.sh" --target "$unsafe_entry_target" --no-hooks --bootstrap codex > "$TMP_DIR/unsafe-entry.log" 2>&1; then
+  fail "mismatched dedicated entry was allowed to bootstrap"
+fi
+grep -Fq 'refusing to bootstrap through an untrusted entry' "$TMP_DIR/unsafe-entry.log" || fail "untrusted entry refusal was not clear"
+grep -Fq 'refusing to bootstrap through an untrusted entry' "$TMP_DIR/unsafe-entry.log" || fail "untrusted entry did not suppress bootstrap"
+repeat_target="$TMP_DIR/repeat-business-target"
+mkdir -p "$repeat_target"
+printf '#!/usr/bin/env bash\necho business\n' > "$repeat_target/install.sh"
+bash "$REPO_ROOT/install.sh" --target "$repeat_target" --no-hooks > "$TMP_DIR/repeat-first.log" 2>&1
+bash "$repeat_target/.agent-maintenance/flywheel-install.sh" --target "$repeat_target" --no-hooks > "$TMP_DIR/repeat-second.log" 2>&1
+grep -Fq 'UNCHANGED .agent-maintenance/flywheel-install.sh' "$TMP_DIR/repeat-second.log" || fail "repeated dedicated installer did not recognize its entry"
+grep -Fq 'echo business' "$repeat_target/install.sh" || fail "dedicated rerun changed business install.sh"
+# FIFO/socket/device/symlink destinations are rejected before publication.
+for special_kind in socket device symlink; do
+  special_target="$TMP_DIR/special-$special_kind"
+  mkdir -p "$special_target"
+  case "$special_kind" in
+    socket) python3 - "$special_target/CLAUDE.md" <<'PY2'
+import socket, sys
+s=socket.socket(socket.AF_UNIX); s.bind(sys.argv[1]); s.close()
+PY2
+      ;;
+    device) mknod "$special_target/CLAUDE.md" c 1 7 2>/dev/null || continue ;;
+    symlink) ln -s "$TMP_DIR/outside-special" "$special_target/CLAUDE.md" ;;
+  esac
+  special_status=0
+  timeout 10 bash "$REPO_ROOT/install.sh" --target "$special_target" --no-hooks > "$TMP_DIR/special-$special_kind.log" 2>&1 || special_status=$?
+  [[ "$special_status" -eq 3 ]] || fail "$special_kind target was not rejected cleanly: $special_status"
+  [[ ! -e "$special_target/AGENTS.md" ]] || fail "$special_kind rejection published files"
+done
 # A script streamed through stdin has no BASH_SOURCE path. Simulate git clone
 # returning one complete checkout and verify the pipe shim delegates to its installer.
 mock_bin="$TMP_DIR/mock-bin"

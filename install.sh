@@ -145,6 +145,7 @@ files=(
   .github/PULL_REQUEST_TEMPLATE.md
   .github/workflows/lesson-promotion-gate.yml
 )
+template_entry="$TARGET_DIR/.agent-maintenance/flywheel-install.sh"
 while IFS= read -r -d '' source_path; do
   files+=("${source_path#"$SOURCE_DIR"/}")
 done < <(find "$SOURCE_DIR/scripts" -type f ! -path '*/__pycache__/*' ! -name '*.pyc' -print0)
@@ -158,6 +159,10 @@ for relative_path in "${files[@]}"; do
     exit 2
   }
 done
+
+safe_compare_target() {
+  python3 "$TRANSACTION_HELPER" compare "$TARGET_DIR" "$1" "$2"
+}
 
 validate_destination_parents() {
   local relative_path="$1"
@@ -203,6 +208,24 @@ for relative in relative_files:
         print(f"ERROR: existing target path is not a regular file (preserved): {relative}", file=sys.stderr)
         sys.exit(3)
 PY
+validate_destination_parents ".agent-maintenance/flywheel-install.sh" || exit 3
+template_entry_conflict=0
+if [[ -L "$template_entry" || ( -e "$template_entry" && ! -f "$template_entry" ) ]]; then
+  echo "ERROR: existing template installer entry is not a regular file: .agent-maintenance/flywheel-install.sh" >&2
+  exit 3
+elif [[ -e "$template_entry" ]]; then
+  if safe_compare_target ".agent-maintenance/flywheel-install.sh" "$INSTALLER_PATH"; then
+    :
+  else
+    compare_status=$?
+    if ((compare_status > 1)); then
+      echo "ERROR: cannot safely compare existing template installer entry; it was preserved." >&2
+      exit 3
+    fi
+    template_entry_conflict=1
+  fi
+fi
+
 if [[ "$INSTALL_HOOKS" == 1 ]]; then
   validate_destination_parents ".codex/hooks.json" || exit 3
   validate_destination_parents ".claude/settings.json" || exit 3
@@ -401,7 +424,7 @@ fi
 if [[ "$INSTALL_HOOKS" == 1 ]]; then
   hook_script="$TARGET_DIR/.agent-maintenance/session-start.sh"
   if [[ -e "$hook_script" || -L "$hook_script" ]]; then
-    if [[ ! -f "$hook_script" ]] || ! cmp -s "$SOURCE_DIR/.agent-maintenance/session-start.sh" "$hook_script"; then
+    if [[ ! -f "$hook_script" ]] || ! safe_compare_target ".agent-maintenance/session-start.sh" "$SOURCE_DIR/.agent-maintenance/session-start.sh"; then
       echo "ERROR: existing .agent-maintenance/session-start.sh differs from the installer; it was preserved and no startup hooks were registered." >&2
       echo "       Resolve the file conflict, or use --no-hooks for file-only installation." >&2
       exit 3
@@ -413,7 +436,6 @@ fi
 # files or provider settings. This checks only paths that would actually change.
 preflight_write_access() {
   python3 - "$SOURCE_DIR" "$TARGET_DIR" "$CODEX_HOOKS_ENABLED" "$CLAUDE_HOOKS_ENABLED" "${files[@]}" <<'PY'
-import filecmp
 import json
 import errno
 import os
@@ -454,21 +476,10 @@ def open_checked_settings(path, expected):
         handle.close()
         raise
 
-def needs_managed_agents_write(source, destination):
-    try:
-        info = os.lstat(destination)
-    except FileNotFoundError:
-        return False
-    if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
-        return False
-    return not filecmp.cmp(source, destination, shallow=False)
-
 for relative in relative_files:
     destination = os.path.join(target_dir, relative)
     if os.path.lexists(destination):
-        if relative == "AGENTS.md" and needs_managed_agents_write(
-            os.path.join(source_dir, relative), destination
-        ):
+        if relative == "AGENTS.md":
             needed_directories.add(os.path.dirname(destination))
         continue
     needed_directories.add(os.path.dirname(destination))
@@ -730,7 +741,7 @@ for relative_path in "${files[@]}"; do
       if [[ -L "$destination_path" || ! -f "$destination_path" ]]; then
         echo "PRESERVED existing non-regular or symlink file: AGENTS.md"
         conflicts+=("$relative_path")
-      elif [[ "$source_path" -ef "$destination_path" ]] || cmp -s "$source_path" "$destination_path"; then
+      elif [[ "$source_path" -ef "$destination_path" ]] || safe_compare_target "$relative_path" "$source_path"; then
         echo "UNCHANGED $relative_path"
       elif prepare_managed_agents "$destination_path"; then
         :
@@ -744,7 +755,7 @@ for relative_path in "${files[@]}"; do
       fi
       continue
     fi
-    if [[ "$source_path" -ef "$destination_path" ]] || cmp -s "$source_path" "$destination_path"; then
+    if [[ "$source_path" -ef "$destination_path" ]] || safe_compare_target "$relative_path" "$source_path"; then
       echo "UNCHANGED $relative_path"
       [[ "$relative_path" == "prompts/bootstrap-project.md" ]] && prompt_ready=1
     else
@@ -777,15 +788,15 @@ if [[ -e "$template_entry" || -L "$template_entry" ]]; then
     echo "ERROR: existing template installer entry is not a regular file: .agent-maintenance/flywheel-install.sh" >&2
     exit 3
   fi
-  if cmp -s "$SOURCE_DIR/install.sh" "$template_entry"; then
+  if ((template_entry_conflict == 0)); then
     echo "UNCHANGED .agent-maintenance/flywheel-install.sh"
   else
     echo "PRESERVED existing file (not overwritten): .agent-maintenance/flywheel-install.sh"
     conflicts+=(".agent-maintenance/flywheel-install.sh")
   fi
 else
-  python3 "$TRANSACTION_HELPER" copy "$TARGET_DIR" ".agent-maintenance/flywheel-install.sh" "$SOURCE_DIR/install.sh" "$transaction_state" >/dev/null
-  chmod --reference="$SOURCE_DIR/install.sh" "$template_entry"
+  python3 "$TRANSACTION_HELPER" copy "$TARGET_DIR" ".agent-maintenance/flywheel-install.sh" "$INSTALLER_PATH" "$transaction_state" >/dev/null
+  chmod --reference="$INSTALLER_PATH" "$template_entry"
   echo "INSTALLED .agent-maintenance/flywheel-install.sh"
 fi
 
@@ -830,6 +841,11 @@ fi
 if ((${#hook_config_conflicts[@]})); then
   printf 'NOTICE: startup-hook registration was skipped for existing provider settings that need a manual merge: %s.\n' \
     "${hook_config_conflicts[*]}"
+fi
+
+if ((template_entry_conflict)) && [[ -n "$BOOTSTRAP_AGENT" ]]; then
+  echo "ERROR: existing .agent-maintenance/flywheel-install.sh differs from this installer; refusing to bootstrap through an untrusted entry." >&2
+  exit 3
 fi
 
 if ((manual_merge_required)); then
@@ -882,4 +898,8 @@ fi
 
 echo
 echo "Installation complete for: $TARGET_DIR"
-echo "To initialize now: ./.agent-maintenance/flywheel-install.sh --bootstrap codex  OR  ./.agent-maintenance/flywheel-install.sh --bootstrap claude"
+if ((template_entry_conflict)); then
+  echo "The existing .agent-maintenance/flywheel-install.sh differs from this installer; inspect and replace it before bootstrapping."
+else
+  echo "To initialize now: ./.agent-maintenance/flywheel-install.sh --bootstrap codex  OR  ./.agent-maintenance/flywheel-install.sh --bootstrap claude"
+fi

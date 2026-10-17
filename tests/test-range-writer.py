@@ -199,13 +199,19 @@ class FrozenWriterTests(unittest.TestCase):
         policy_path.write_text(
             json.dumps(
                 {
-                    "policy_version": 1,
+                    "policy_version": 2,
                     "rules": [
                         {
                             "id": "review-records",
                             "kind": "path-glob",
                             "patterns": ["docs/reviews/**"],
                             "reason": "review records are excluded from code review ranges",
+                        },
+                        {
+                            "id": "generated-data-paths",
+                            "kind": "path-prefix",
+                            "paths": ["data/generated"],
+                            "reason": "only this explicit generated-data directory is excluded",
                         }
                     ],
                 },
@@ -225,12 +231,22 @@ class FrozenWriterTests(unittest.TestCase):
         review_dir = self.repo / "docs/reviews"
         review_dir.mkdir(parents=True)
         (review_dir / "excluded-input.md").write_text("excluded record\n", encoding="utf-8")
-        git(self.repo, "add", "LESSONS.md", "docs/reviews/excluded-input.md")
-        git(self.repo, "commit", "-m", "advance range and add excluded review record")
+        generated_dir = self.repo / "data/generated"
+        generated_dir.mkdir(parents=True)
+        (generated_dir / "snapshot.json").write_text('{"rows":3}\n', encoding="utf-8")
+        (self.repo / "src").mkdir()
+        (self.repo / "src/workflow.py").write_text("def run():\n    return True\n", encoding="utf-8")
+        git(self.repo, "add", "LESSONS.md", "docs/reviews/excluded-input.md", "data/generated/snapshot.json", "src/workflow.py")
+        git(self.repo, "commit", "-m", "advance range and add excluded data with workflow code")
 
         manifest = FREEZER.freeze_range(self.repo)
         self.assertEqual(manifest["from"], from_sha)
-        self.assertEqual(len(manifest["excluded_paths"]), 1)
+        self.assertEqual(len(manifest["excluded_paths"]), 2)
+        self.assertIn(manifest["through"], {item["sha"] for item in manifest["commits"]})
+        excluded_paths = {record["path"] for record in manifest["excluded_paths"]}
+        self.assertIn("data/generated/snapshot.json", excluded_paths)
+        self.assertIn("docs/reviews/excluded-input.md", excluded_paths)
+        self.assertNotIn("src/workflow.py", excluded_paths)
         manifest_path, archive_path, lessons_path = write_inputs(
             self.inputs, manifest, "review body", "### Actual freezer lesson"
         )
@@ -253,6 +269,17 @@ class FrozenWriterTests(unittest.TestCase):
         bad_policy = json.loads(json.dumps(self.manifest))
         bad_policy["exclusion_policy"]["rules"] = {"not": "an array"}
         cases.append(("policy rules", bad_policy))
+        bad_prefix = json.loads(json.dumps(self.manifest))
+        bad_prefix["exclusion_policy"]["policy_version"] = 2
+        bad_prefix["exclusion_policy"]["rules"] = [
+            {
+                "id": "generated-data-paths",
+                "kind": "path-prefix",
+                "paths": ["data/**"],
+                "reason": "wildcards are not literal paths",
+            }
+        ]
+        cases.append(("path-prefix policy", bad_prefix))
         bad_exclusion = json.loads(json.dumps(self.manifest))
         bad_exclusion["excluded_paths"] = [{"unexpected": "record"}]
         cases.append(("excluded-path record", bad_exclusion))
@@ -590,7 +617,7 @@ class FrozenWriterTests(unittest.TestCase):
     def test_unknown_watermark_is_not_bootstrapped_and_does_not_create_archive_dirs(self) -> None:
         self.lessons.write_text(self.lessons.read_text(encoding="utf-8").replace(FROM, "UNKNOWN"), encoding="utf-8")
         manifest_path, archive_path, lessons_path = write_inputs(self.inputs, self.manifest, "review", "lesson")
-        with self.assertRaisesRegex(WRITER.WriterError, "UNKNOWN"):
+        with self.assertRaisesRegex(WRITER.WriterError, "ask a maintainer to choose the first target-branch commit"):
             WRITER.write_review(self.repo, manifest_path, "docs/reviews/2026-10-16.md", archive_path, lessons_path)
         self.assertFalse((self.repo / "docs").exists())
         self.assertIn("reviewed-through: UNKNOWN", self.lessons.read_text(encoding="utf-8").splitlines()[0])

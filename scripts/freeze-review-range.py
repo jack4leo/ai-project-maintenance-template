@@ -202,6 +202,14 @@ def read_watermark(repo: Path, length: int) -> tuple[str, bytes, tuple[int, ...]
         raw_value = match.group(1).decode("ascii", errors="strict")
     except UnicodeDecodeError as exc:
         raise FreezeError("reviewed-through is not a hexadecimal object ID") from exc
+    if raw_value == "UNKNOWN":
+        raise FreezeError(
+            "reviewed-through is UNKNOWN; stop and ask a maintainer to choose the first "
+            "target-branch commit to include. The exclusive watermark is that commit's "
+            "target-branch parent (the target-branch/first parent for a merge). Do not "
+            "infer or initialize this starting watermark automatically. If there is no target-branch "
+            "parent, stop for an explicit baseline design decision."
+        )
     value = validate_object_id(raw_value, length, "reviewed-through")
     if value == "0" * length:
         raise FreezeError("reviewed-through cannot be the all-zero object ID")
@@ -302,7 +310,7 @@ def _reject_duplicate_json_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     return result
 
 
-def parse_policy(content: bytes) -> list[dict[str, Any]]:
+def parse_policy(content: bytes) -> tuple[int, list[dict[str, Any]]]:
     try:
         text = content.decode("utf-8", errors="strict")
         policy = json.loads(text, object_pairs_hook=_reject_duplicate_json_keys)
@@ -310,7 +318,8 @@ def parse_policy(content: bytes) -> list[dict[str, Any]]:
         raise FreezeError(f"invalid exclusion policy JSON: {exc}") from exc
     if not isinstance(policy, dict) or set(policy) != {"policy_version", "rules"}:
         raise FreezeError("exclusion policy must contain only policy_version and rules")
-    if type(policy["policy_version"]) is not int or policy["policy_version"] != 1:
+    policy_version = policy["policy_version"]
+    if type(policy_version) is not int or policy_version not in {1, 2}:
         raise FreezeError("unsupported exclusion policy version")
     if not isinstance(policy["rules"], list):
         raise FreezeError("exclusion policy rules must be an array")
@@ -325,10 +334,14 @@ def parse_policy(content: bytes) -> list[dict[str, Any]]:
         expected = (
             {"id", "kind", "patterns", "reason"}
             if kind == "path-glob"
+            else {"id", "kind", "paths", "reason"}
+            if kind == "path-prefix"
             else {"id", "kind", "reason"}
         )
-        if kind not in {"path-glob", "binary-nul-byte", "gitlink"}:
+        if kind not in {"path-glob", "path-prefix", "binary-nul-byte", "gitlink"}:
             raise FreezeError(f"{where} has an unknown kind")
+        if kind == "path-prefix" and policy_version < 2:
+            raise FreezeError(f"{where} path-prefix rules require exclusion policy version 2")
         if set(raw_rule) != expected:
             raise FreezeError(f"{where} has unexpected or missing fields")
         identifier = raw_rule["id"]
@@ -353,9 +366,18 @@ def parse_policy(content: bytes) -> list[dict[str, Any]]:
             for pattern in patterns:
                 validate_glob(pattern, where)
             normalized["patterns"] = list(patterns)
+        elif kind == "path-prefix":
+            paths = raw_rule["paths"]
+            if not isinstance(paths, list) or any(not isinstance(path, str) for path in paths):
+                raise FreezeError(f"{where} paths must be an array of literal repository paths")
+            if len(set(paths)) != len(paths):
+                raise FreezeError(f"{where} contains duplicate paths")
+            for path in paths:
+                validate_explicit_path(path, where)
+            normalized["paths"] = list(paths)
         normalized["reason"] = reason
         rules.append(normalized)
-    return rules
+    return policy_version, rules
 
 
 def validate_glob(pattern: str, where: str) -> None:
@@ -367,6 +389,20 @@ def validate_glob(pattern: str, where: str) -> None:
     for segment in segments:
         if "**" in segment and segment != "**":
             raise FreezeError(f"{where} may use ** only as a whole path segment")
+
+
+def validate_explicit_path(path: str, where: str) -> None:
+    if not path or path.startswith("/") or path.endswith("/") or "\\" in path or "\x00" in path:
+        raise FreezeError(f"{where} has an invalid literal repository-relative path")
+    try:
+        path.encode("utf-8", errors="strict")
+    except UnicodeEncodeError as exc:
+        raise FreezeError(f"{where} path is not valid UTF-8") from exc
+    segments = path.split("/")
+    if any(segment in {"", ".", ".."} for segment in segments):
+        raise FreezeError(f"{where} has an invalid path segment")
+    if any("*" in segment or "?" in segment for segment in segments):
+        raise FreezeError(f"{where} paths must be literal; wildcard characters are not allowed")
 
 
 def _segment_match(pattern: str, segment: str) -> bool:
@@ -589,6 +625,17 @@ def exclusion_records(
                         )
                         if matched_pattern is not None:
                             matched.append((rule_index, rule, "pattern", matched_pattern))
+                    elif kind == "path-prefix":
+                        matched_prefix = next(
+                            (
+                                prefix
+                                for prefix in rule["paths"]
+                                if path == prefix or path.startswith(prefix + "/")
+                            ),
+                            None,
+                        )
+                        if matched_prefix is not None:
+                            matched.append((rule_index, rule, "path_prefix", matched_prefix))
                     elif kind == "gitlink" and is_gitlink:
                         matched.append((rule_index, rule, "classification", "gitlink"))
                     elif kind == "binary-nul-byte" and not is_gitlink:
@@ -667,14 +714,14 @@ def freeze_range(repo_path: Path) -> dict[str, Any]:
     policy_blob, policy_bytes, policy_identity = committed_policy_blob(
         repo, head, object_format, length
     )
-    rules = parse_policy(policy_bytes)
+    policy_version, rules = parse_policy(policy_bytes)
     exclusions = exclusion_records(repo, commits, rules, length)
     policy = {
         "source_path": POLICY_PATH,
         "source_commit": head,
         "source_blob": policy_blob,
         "source_sha256": hashlib.sha256(policy_bytes).hexdigest(),
-        "policy_version": 1,
+        "policy_version": policy_version,
         "rules": rules,
     }
     payload: dict[str, Any] = {

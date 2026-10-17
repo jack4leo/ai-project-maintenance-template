@@ -183,6 +183,73 @@ class LessonPromotionTests(unittest.TestCase):
         )
         self.assertTrue(any("requires a non-placeholder Markdown link" in error for error in errors), errors)
 
+    def test_four_level_lesson_heading_is_rejected_instead_of_ignored(self):
+        malformed = lessons_document(
+            promoted=(
+                lesson_record(include_evidence_field=False).replace(
+                    "### L-0001 —", "#### L-0001 —"
+                ),
+            )
+        )
+        errors = validate_documents(malformed, standards_document(rule_ids=()))
+        self.assertTrue(any("lesson headings must use" in error for error in errors), errors)
+
+    def test_four_level_promoted_rule_heading_is_rejected_instead_of_ignored(self):
+        malformed_rule = standards_document().replace(
+            "##### PS-0001 —", "#### PS-0001 —"
+        ).replace("- **Scope:** Synthetic test-only fixture.\n", "")
+        errors = validate_documents(lessons_document(), malformed_rule)
+        self.assertTrue(any("promoted rules must use" in error for error in errors), errors)
+
+    def test_unrecognized_prose_before_lesson_record_is_rejected(self):
+        malformed = lessons_document(
+            promoted=("UNRECOGNIZED PROSE\n" + lesson_record(),)
+        )
+        errors = validate_documents(malformed, standards_document())
+        self.assertTrue(any("unrecognized content before first record" in error for error in errors), errors)
+
+    def test_unrecognized_content_before_rule_record_is_rejected(self):
+        malformed = standards_document()
+        malformed = malformed.replace(
+            RULE_START, RULE_START + "\n- **Unknown:** value"
+        )
+        errors = validate_documents(lessons_document(), malformed)
+        self.assertTrue(any("unrecognized content before first record" in error for error in errors), errors)
+
+    def test_malformed_headings_are_not_ignored(self):
+        for heading in ("####L-9999 — malformed", "   #### L-9999 — indented", "####### L-9999 — too deep"):
+            with self.subTest(heading=heading):
+                malformed = lessons_document(promoted=(heading,))
+                errors = validate_documents(malformed, standards_document(rule_ids=()))
+                self.assertTrue(any("lesson headings must use" in error for error in errors), errors)
+
+    def test_indented_malformed_headings_after_valid_records_are_rejected(self):
+        for indent in ("       ", "\t"):
+            with self.subTest(indent=repr(indent), kind="lesson"):
+                lessons = lessons_document(promoted=(
+                    lesson_record(), indent + "####L-9999 — malformed",
+                ))
+                self.assertTrue(validate_documents(lessons, standards_document()))
+            with self.subTest(indent=repr(indent), kind="standard"):
+                standards = standards_document().replace(
+                    RULE_END, indent + "####PS-9999 — malformed\n" + RULE_END
+                )
+                self.assertTrue(validate_documents(
+                    lessons_document(promoted=(lesson_record(),)), standards
+                ))
+
+    def test_empty_blocks_and_writer_markers_are_allowed(self):
+        key = "sha256:" + "a" * 64
+        lessons = lessons_document(
+            promoted=(
+                f"<!-- frozen-review-lessons: {key} -->\n"
+                f"<!-- no lesson entries for range {key}; a retry may fill this block -->\n"
+                f"<!-- /frozen-review-lessons: {key} -->",
+            )
+        )
+        errors = validate_documents(lessons, standards_document(rule_ids=()))
+        self.assertEqual(errors, [])
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

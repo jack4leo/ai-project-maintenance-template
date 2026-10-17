@@ -59,6 +59,22 @@ def _field_values(body: str, name: str) -> list[str]:
     return pattern.findall(body)
 
 
+def _heading_like(line: str) -> bool:
+    """Recognize hash-prefixed records even with invalid indentation/spacing."""
+    return re.match(r"^[ \t]*#+", line) is not None
+
+
+def _record_starts(lines: list[str], first_line: int, errors: list[str], kind: str) -> list[int]:
+    starts = [index for index, line in enumerate(lines) if _heading_like(line)]
+    first = starts[0] if starts else len(lines)
+    for index, line in enumerate(lines[:first]):
+        if line.strip() and not line.lstrip().startswith("<!--"):
+            errors.append(
+                f"{kind}:{first_line + index}: unrecognized content before first record"
+            )
+    return starts
+
+
 def _valid_iso_date(value: str) -> bool:
     if not re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}", value):
         return False
@@ -150,7 +166,7 @@ def _parse_lessons(text: str, errors: list[str]) -> dict[str, Lesson]:
     ):
         block, first_line = _marked_block(text, block_name, errors)
         lines = block.splitlines()
-        starts = [index for index, line in enumerate(lines) if line.startswith("### ")]
+        starts = _record_starts(lines, first_line, errors, "LESSONS.md")
         for position, start_index in enumerate(starts):
             end_index = starts[position + 1] if position + 1 < len(starts) else len(lines)
             heading = lines[start_index]
@@ -173,7 +189,7 @@ def _parse_lessons(text: str, errors: list[str]) -> dict[str, Lesson]:
 def _parse_standard_rules(text: str, errors: list[str]) -> dict[str, PromotedRule]:
     block, first_line = _marked_block(text, "PROMOTED_RULES", errors)
     lines = block.splitlines()
-    starts = [index for index, line in enumerate(lines) if line.startswith("##### ")]
+    starts = _record_starts(lines, first_line, errors, "docs/code-standards.md")
     rules: dict[str, PromotedRule] = {}
     for position, start_index in enumerate(starts):
         end_index = starts[position + 1] if position + 1 < len(starts) else len(lines)

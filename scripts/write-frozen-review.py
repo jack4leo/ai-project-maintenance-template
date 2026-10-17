@@ -18,8 +18,13 @@ from datetime import date
 from pathlib import Path
 from typing import Any
 
+try:
+    from scripts.watermark import WatermarkError, parse_watermark
+except ModuleNotFoundError:  # direct execution as scripts/write-frozen-review.py
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from watermark import WatermarkError, parse_watermark
 
-MARKER = re.compile(rb"<!-- reviewed-through: ([^\s<>]+)(?:[ \t]+[^<>]*)? -->")
+
 ARCHIVE_START = re.compile(rb"^<!-- frozen-review-range: (sha256:[0-9a-f]{64}) -->$", re.MULTILINE)
 ARCHIVE_END = re.compile(rb"^<!-- /frozen-review-range: (sha256:[0-9a-f]{64}) -->$", re.MULTILINE)
 LESSON_START = re.compile(rb"^<!-- frozen-review-lessons: (sha256:[0-9a-f]{64}) -->$", re.MULTILINE)
@@ -31,6 +36,8 @@ PROMOTED_STANDARD_END = re.compile(rb"^<!-- /frozen-review-standard: (sha256:[0-
 RANGE_KEY = re.compile(r"^sha256:[0-9a-f]{64}$")
 OBJECT_ID = re.compile(r"^[0-9a-f]+$")
 LOCK_NAME = "frozen-review-writer.lock"
+# These repository state documents are writer-owned destinations, never archives.
+RESERVED_ARCHIVE_PATHS = {"LESSONS.md", "docs/code-standards.md", "docs/project-profile.md"}
 POLICY_PATH = "docs/automation/range-exclusions.json"
 RULE_ID = re.compile(r"^[a-z0-9][a-z0-9-]*$")
 SHA256_HEX = re.compile(r"^[0-9a-f]{64}$")
@@ -326,10 +333,13 @@ def load_manifest(path: Path) -> dict[str, Any]:
 
 def validate_relative_archive(value: str) -> tuple[str, ...]:
     if not value or value.startswith("/") or "\\" in value or "\x00" in value:
-        raise WriterError("archive path must be a repository-relative docs/reviews Markdown path")
+        raise WriterError("archive path must be a repository-relative Markdown path")
     parts = tuple(value.split("/"))
-    if len(parts) < 3 or parts[:2] != ("docs", "reviews") or not parts[-1].endswith(".md"):
-        raise WriterError("archive path must be under docs/reviews/ and end in .md")
+    normalized = "/".join(parts)
+    if normalized in RESERVED_ARCHIVE_PATHS:
+        raise WriterError(f"archive path is reserved state document: {normalized}")
+    if len(parts) < 2 or not parts[-1].endswith(".md"):
+        raise WriterError("archive path must be repository-relative and end in .md")
     if any(part in ("", ".", "..") for part in parts):
         raise WriterError("archive path must not contain empty, dot, or parent components")
     return parts
@@ -560,17 +570,10 @@ def atomic_write_at(
 
 
 def marker_value(lessons: bytes) -> tuple[str, int, int]:
-    markers = list(MARKER.finditer(lessons))
-    if len(markers) != 1:
-        raise WriterError("LESSONS.md must contain exactly one reviewed-through marker")
-    match = markers[0]
-    first_line_end = lessons.find(b"\n")
-    if first_line_end < 0 or match.start() >= first_line_end:
-        raise WriterError("reviewed-through marker must be on the first line of LESSONS.md")
     try:
-        value = match.group(1).decode("ascii")
-    except UnicodeDecodeError as exc:
-        raise WriterError("reviewed-through marker is not ASCII") from exc
+        value, start, end = parse_watermark(lessons)
+    except WatermarkError as exc:
+        raise WriterError(str(exc)) from exc
     if value == "UNKNOWN":
         raise WriterError(
             "reviewed-through is UNKNOWN; ask a maintainer to choose the first target-branch "
@@ -580,7 +583,7 @@ def marker_value(lessons: bytes) -> tuple[str, int, int]:
         )
     if len(value) not in (40, 64) or not OBJECT_ID.fullmatch(value):
         raise WriterError("reviewed-through must be a full lowercase hexadecimal object ID")
-    return value, match.start(1), match.end(1)
+    return value, start, end
 
 
 def lesson_section_markers(lines: list[bytes], name: str) -> tuple[int, int | None]:
@@ -1146,6 +1149,13 @@ def write_review(
     archive_parent_fd: int | None = None
     standards_parent_fd: int | None = None
     try:
+        # Validate the existing watermark before creating the cooperative lock
+        # or any archive directories/files. The second read below remains the
+        # transaction's identity-checked snapshot.
+        initial_lessons, initial_identity, _ = read_file_at(root_fd, "LESSONS.md", "LESSONS.md")
+        if initial_lessons is None or initial_identity is None:
+            raise WriterError("LESSONS.md is missing")
+        marker_value(initial_lessons)
         common_dir = git_common_dir(repo_path)
         lock_dir_fd, lock_fd = acquire_writer_lock(common_dir)
         archive_name = archive_parts[-1]

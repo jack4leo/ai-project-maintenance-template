@@ -39,7 +39,7 @@
 - Daily review execution method / agent: `UNKNOWN`
 - Run time / time zone: `UNKNOWN`
 - Concurrent/overlapping runs, failure retries, timeout/interruption, and partial-write recovery strategy: `UNKNOWN` (verify against the project's actual scheduler and storage mechanisms)
-- Review record archive location: `docs/reviews/YYYY-MM-DD.md` (template convention; maintainers may adjust this for the project)
+- Review record archive location: `docs/reviews/YYYY-MM-DD.md` by default; the writer accepts a maintainer-selected repository-relative `.md` path (without `..`, absolute paths, or symlinked directories)
 - Canonical reviewed-through SHA: the single marker at the top of [`LESSONS.md`](../LESSONS.md); do not maintain a duplicate watermark here.
 - Last review date: `UNKNOWN`
 - Lesson promotion threshold: 3 different review dates by default; see [`LESSONS.md`](../LESSONS.md). Only maintainers may explicitly adjust it.

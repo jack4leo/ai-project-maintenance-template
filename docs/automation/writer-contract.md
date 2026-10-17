@@ -7,7 +7,7 @@
 The caller must provide all of the following explicitly:
 
 - `--manifest`: the canonical UTF-8 JSON file emitted by the range freezer, including its single trailing newline;
-- `--archive`: an explicit repository-relative destination under `docs/reviews/` ending in `.md`;
+- `--archive`: an explicit repository-relative destination ending in `.md`; `docs/reviews/YYYY-MM-DD.md` is the default convention, while other roots are accepted only as normalized relative paths and are opened without following symlinked directories;
 - `--archive-content`: UTF-8 review-record body prepared by the caller; and
 - `--lessons-content`: UTF-8 Lesson entries prepared by the caller. An empty file records an empty, retryable Lessons block.
 - optionally, both `--promoted-lessons-content` and `--promoted-standards-content`: complete promoted Lesson records and corresponding `PS-` rules, prepared by the caller only after checking the promotion threshold and evidence. They must be supplied together; omitting both leaves promotion history and standards untouched.
@@ -22,7 +22,7 @@ For each range key, the writer upserts one delimited block in the archive and on
 
 The sequence is:
 
-1. Validate and lock the writer transaction; validate the manifest and existing watermark.
+1. Validate the manifest and existing watermark before creating the cooperative lock or any destination directory/file, then lock the writer transaction.
 2. Validate all requested destination sections and compute updates before the first write.
 3. Upsert the archive, then (if requested) `docs/code-standards.md`, then `LESSONS.md`, keeping the prior watermark. Before any destination write and immediately before the final watermark write, the proposed `LESSONS.md` must have globally unique Lesson IDs across the complete bounded `ACTIVE_LESSONS` and `PROMOTED_LESSONS` sections. Re-read/verify every requested range-key block and destination.
 4. Atomically replace `LESSONS.md` with the `reviewed-through` value set to the manifest's `through`. No file write follows this final write.

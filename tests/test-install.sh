@@ -1065,6 +1065,12 @@ grep -Fq 'Cloning Self-Evolution Flywheel source' "$TMP_DIR/remote.log" \
   || fail "pipe installer did not clone the source checkout"
 [[ -f "$remote_target/prompts/bootstrap-project.md" ]] \
   || fail "pipe installer did not install the bootstrap prompt"
+[[ -f "$remote_target/scripts/watermark.py" ]] \
+  || fail "installer did not copy the shared watermark module"
+( cd /tmp && python3 "$remote_target/scripts/freeze-review-range.py" --help > "$TMP_DIR/installed-freezer-help.log" ) \
+  || fail "installed freezer CLI failed outside its source checkout"
+( cd /tmp && python3 "$remote_target/scripts/write-frozen-review.py" --help > "$TMP_DIR/installed-writer-help.log" ) \
+  || fail "installed writer CLI failed outside its source checkout"
 
 python3 "$REPO_ROOT/tests/test-installer-races.py"
 python3 "$REPO_ROOT/tests/test-installer-recovery.py"

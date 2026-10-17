@@ -655,7 +655,7 @@ grep -Fq 'bootstrap reminder' "$TMP_DIR/session-unmarked.log" \
   || fail "session-start did not emit a bootstrap reminder for an unmarked project"
 grep -Fq 'must not preempt or interrupt' "$TMP_DIR/session-unmarked.log" \
   || fail "session-start reminder could preempt the user's task"
-grep -Fq './install.sh --bootstrap codex' "$TMP_DIR/session-unmarked.log" \
+grep -Fq './.agent-maintenance/flywheel-install.sh --bootstrap codex' "$TMP_DIR/session-unmarked.log" \
   || fail "session-start did not point to explicit bootstrap"
 [[ ! -e "$session_target/.agent-maintenance/bootstrap-complete" ]] \
   || fail "session-start created a completion marker"
@@ -1031,11 +1031,107 @@ python3 - "$TMP_DIR/missing-prompt.stdout" "$TMP_DIR/missing-prompt.stderr" <<'P
 import sys
 from pathlib import Path
 stdout, stderr = (Path(path).read_bytes() for path in sys.argv[1:])
-expected = b"Self-Evolution Flywheel: prompts/bootstrap-project.md is missing; bootstrap cannot run. This hook did not perform bootstrap; restore the prompt before using ./install.sh --bootstrap codex|claude.\n"
+expected = b"Self-Evolution Flywheel: prompts/bootstrap-project.md is missing; bootstrap cannot run. This hook did not perform bootstrap; restore the prompt before using ./.agent-maintenance/flywheel-install.sh --bootstrap codex|claude.\n"
 assert stderr == expected, f"unexpected missing-prompt stderr: {stderr!r}"
 assert stdout == b"", f"missing-prompt diagnostic was written to stdout: {stdout!r}"
 PY
 
+# F1: an existing project installer is preserved, while the template gets a
+# distinct executable entry and every bootstrap instruction names that entry.
+entry_conflict_target="$TMP_DIR/entry-conflict-target"
+mkdir -p "$entry_conflict_target"
+printf '#!/usr/bin/env bash\necho PROJECT_INSTALLER_NOT_FLYWHEEL\n' > "$entry_conflict_target/install.sh"
+chmod +x "$entry_conflict_target/install.sh"
+bash "$REPO_ROOT/install.sh" --target "$entry_conflict_target" --no-hooks \
+  > "$TMP_DIR/entry-conflict.log" 2>&1
+grep -Fq 'PRESERVED existing file (not overwritten): install.sh' "$TMP_DIR/entry-conflict.log" \
+  || fail "business install.sh was not preserved"
+grep -Fq './.agent-maintenance/flywheel-install.sh --bootstrap codex' "$TMP_DIR/entry-conflict.log" \
+  || fail "completion output named the ambiguous business installer"
+[[ -x "$entry_conflict_target/.agent-maintenance/flywheel-install.sh" ]] \
+  || fail "dedicated template installer entry was not executable"
+grep -Fq 'flywheel-install.sh --bootstrap codex' "$entry_conflict_target/.agent-maintenance/session-start.sh" \
+  || fail "startup hook named the ambiguous business installer"
+if "$entry_conflict_target/install.sh" --bootstrap codex 2>/dev/null | grep -Fq PROJECT_INSTALLER_NOT_FLYWHEEL; then
+  : # proves the business file remains independently owned; the hook never points here.
+else
+  fail "business installer fixture was unexpectedly changed"
+fi
+
+# The dedicated local entry is not a self-repair source: deleting the installed
+# business install.sh must not make it enumerate or copy that file, while using
+# it for another target must fail with guidance to an independent checkout.
+local_source_target="$TMP_DIR/local-source-target"
+mkdir -p "$local_source_target"
+bash "$REPO_ROOT/install.sh" --target "$local_source_target" --no-hooks \
+  > "$TMP_DIR/local-source-first.log" 2>&1
+rm -f "$local_source_target/install.sh"
+(cd "$local_source_target" && bash .agent-maintenance/flywheel-install.sh --no-hooks \
+  > "$TMP_DIR/local-source-second.log" 2>&1) \
+  || fail "dedicated local entry treated missing business install.sh as its source"
+! grep -Fq 'missing installer source file: install.sh' "$TMP_DIR/local-source-second.log" \
+  || fail "local entry still required the target business install.sh"
+[[ ! -e "$local_source_target/install.sh" ]] \
+  || fail "local entry copied or recreated the target business install.sh"
+local_elsewhere_target="$TMP_DIR/local-source-elsewhere"
+mkdir -p "$local_elsewhere_target"
+if bash "$local_source_target/.agent-maintenance/flywheel-install.sh" \
+    --target "$local_elsewhere_target" --no-hooks > "$TMP_DIR/local-source-elsewhere.log" 2>&1; then
+  fail "dedicated local entry accepted a different target root"
+fi
+grep -Fq 'only supports its own project root' "$TMP_DIR/local-source-elsewhere.log" \
+  || fail "cross-target local entry error was not explicit"
+grep -Fq '/abs/source/install.sh --target' "$TMP_DIR/local-source-elsewhere.log" \
+  || fail "cross-target local entry did not guide an independent source checkout"
+[[ ! -e "$local_elsewhere_target/AGENTS.md" ]] \
+  || fail "cross-target local entry published files before rejection"
+
+# F2: lstat rejects a FIFO before any template publication; installation must
+# finish promptly rather than entering cmp and blocking on the pipe.
+fifo_target="$TMP_DIR/fifo-target"
+mkdir -p "$fifo_target"
+mkfifo "$fifo_target/CLAUDE.md"
+fifo_status=0
+timeout 10 bash "$REPO_ROOT/install.sh" --target "$fifo_target" --no-hooks \
+  > "$TMP_DIR/fifo.log" 2>&1 || fifo_status=$?
+[[ "$fifo_status" -eq 3 ]] || fail "FIFO target was not rejected cleanly: $fifo_status"
+grep -Fq 'not a regular file' "$TMP_DIR/fifo.log" || fail "FIFO rejection was not reported"
+[[ ! -e "$fifo_target/AGENTS.md" ]] || fail "FIFO preflight published files before rejection"
+
+# Mismatched dedicated entry is detected before publication and cannot bootstrap.
+unsafe_entry_target="$TMP_DIR/unsafe-entry-target"
+mkdir -p "$unsafe_entry_target/.agent-maintenance"
+printf '#!/usr/bin/env bash\necho untrusted-entry\n' > "$unsafe_entry_target/.agent-maintenance/flywheel-install.sh"
+if bash "$REPO_ROOT/install.sh" --target "$unsafe_entry_target" --no-hooks --bootstrap codex > "$TMP_DIR/unsafe-entry.log" 2>&1; then
+  fail "mismatched dedicated entry was allowed to bootstrap"
+fi
+grep -Fq 'refusing to bootstrap through an untrusted entry' "$TMP_DIR/unsafe-entry.log" || fail "untrusted entry refusal was not clear"
+grep -Fq 'refusing to bootstrap through an untrusted entry' "$TMP_DIR/unsafe-entry.log" || fail "untrusted entry did not suppress bootstrap"
+repeat_target="$TMP_DIR/repeat-business-target"
+mkdir -p "$repeat_target"
+printf '#!/usr/bin/env bash\necho business\n' > "$repeat_target/install.sh"
+bash "$REPO_ROOT/install.sh" --target "$repeat_target" --no-hooks > "$TMP_DIR/repeat-first.log" 2>&1
+bash "$repeat_target/.agent-maintenance/flywheel-install.sh" --target "$repeat_target" --no-hooks > "$TMP_DIR/repeat-second.log" 2>&1
+grep -Fq 'UNCHANGED .agent-maintenance/flywheel-install.sh' "$TMP_DIR/repeat-second.log" || fail "repeated dedicated installer did not recognize its entry"
+grep -Fq 'echo business' "$repeat_target/install.sh" || fail "dedicated rerun changed business install.sh"
+# FIFO/socket/device/symlink destinations are rejected before publication.
+for special_kind in socket device symlink; do
+  special_target="$TMP_DIR/special-$special_kind"
+  mkdir -p "$special_target"
+  case "$special_kind" in
+    socket) python3 - "$special_target/CLAUDE.md" <<'PY2'
+import socket, sys
+s=socket.socket(socket.AF_UNIX); s.bind(sys.argv[1]); s.close()
+PY2
+      ;;
+    device) mknod "$special_target/CLAUDE.md" c 1 7 2>/dev/null || continue ;;
+    symlink) ln -s "$TMP_DIR/outside-special" "$special_target/CLAUDE.md" ;;
+  esac
+  special_status=0
+  timeout 10 bash "$REPO_ROOT/install.sh" --target "$special_target" --no-hooks > "$TMP_DIR/special-$special_kind.log" 2>&1 || special_status=$?
+  [[ "$special_status" -eq 3 ]] || fail "$special_kind target was not rejected cleanly: $special_status"
+  [[ ! -e "$special_target/AGENTS.md" ]] || fail "$special_kind rejection published files"
+done
 # A script streamed through stdin has no BASH_SOURCE path. Simulate git clone
 # returning one complete checkout and verify the pipe shim delegates to its installer.
 mock_bin="$TMP_DIR/mock-bin"
@@ -1065,6 +1161,12 @@ grep -Fq 'Cloning Self-Evolution Flywheel source' "$TMP_DIR/remote.log" \
   || fail "pipe installer did not clone the source checkout"
 [[ -f "$remote_target/prompts/bootstrap-project.md" ]] \
   || fail "pipe installer did not install the bootstrap prompt"
+[[ -f "$remote_target/scripts/watermark.py" ]] \
+  || fail "installer did not copy the shared watermark module"
+( cd /tmp && python3 "$remote_target/scripts/freeze-review-range.py" --help > "$TMP_DIR/installed-freezer-help.log" ) \
+  || fail "installed freezer CLI failed outside its source checkout"
+( cd /tmp && python3 "$remote_target/scripts/write-frozen-review.py" --help > "$TMP_DIR/installed-writer-help.log" ) \
+  || fail "installed writer CLI failed outside its source checkout"
 
 python3 "$REPO_ROOT/tests/test-installer-races.py"
 python3 "$REPO_ROOT/tests/test-installer-recovery.py"

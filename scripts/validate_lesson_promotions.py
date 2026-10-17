@@ -60,8 +60,8 @@ def _field_values(body: str, name: str) -> list[str]:
 
 
 def _heading_like(line: str) -> bool:
-    """Recognize ATX-looking lines, including malformed record headings."""
-    return re.match(r"^ {0,3}#+(?:\s|\S)", line) is not None
+    """Recognize hash-prefixed records even with invalid indentation/spacing."""
+    return re.match(r"^[ \t]*#+", line) is not None
 
 
 def _record_starts(lines: list[str], first_line: int, errors: list[str], kind: str) -> list[int]:

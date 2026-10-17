@@ -223,6 +223,21 @@ class LessonPromotionTests(unittest.TestCase):
                 errors = validate_documents(malformed, standards_document(rule_ids=()))
                 self.assertTrue(any("lesson headings must use" in error for error in errors), errors)
 
+    def test_indented_malformed_headings_after_valid_records_are_rejected(self):
+        for indent in ("       ", "\t"):
+            with self.subTest(indent=repr(indent), kind="lesson"):
+                lessons = lessons_document(promoted=(
+                    lesson_record(), indent + "####L-9999 — malformed",
+                ))
+                self.assertTrue(validate_documents(lessons, standards_document()))
+            with self.subTest(indent=repr(indent), kind="standard"):
+                standards = standards_document().replace(
+                    RULE_END, indent + "####PS-9999 — malformed\n" + RULE_END
+                )
+                self.assertTrue(validate_documents(
+                    lessons_document(promoted=(lesson_record(),)), standards
+                ))
+
     def test_empty_blocks_and_writer_markers_are_allowed(self):
         key = "sha256:" + "a" * 64
         lessons = lessons_document(

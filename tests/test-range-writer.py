@@ -622,6 +622,75 @@ class FrozenWriterTests(unittest.TestCase):
         self.assertEqual((review_dir / ".rollback-retained").read_text(encoding="utf-8"), "preserve rollback artifact\n")
         self.assertEqual((review_dir / ".flywheel-retained").read_text(encoding="utf-8"), "preserve ordinary hidden file\n")
 
+    def test_cross_date_same_body_merges_evidence_and_advances_watermark(self) -> None:
+        lesson = "\n".join(
+            [
+                "### L-0001 — Preserve evidence across review dates",
+                "- **Why:** synthetic end-to-end regression fixture.",
+                "- **Review evidence:**",
+                "  - `2026-10-16` — [first-day evidence](https://example.invalid/evidence/first-day)",
+                "- **Fix or follow-up:** synthetic fixture.",
+                "- **Status:** active",
+            ]
+        )
+        self.run_writer(
+            "first-day archive",
+            lesson,
+            archive="docs/reviews/2026-10-16.md",
+        )
+        first_through = self.manifest["through"]
+        second_day_lesson = lesson.replace(
+            "  - `2026-10-16` — [first-day evidence](https://example.invalid/evidence/first-day)",
+            "  - `2026-10-16` — [first-day evidence](https://example.invalid/evidence/first-day)\n"
+            "  - `2026-10-17` — [second-day evidence](https://example.invalid/evidence/second-day)",
+        )
+        second_manifest = make_manifest(from_sha=first_through, through="f" * 40)
+        second_manifest_path, second_archive_input, second_lessons_input = write_inputs(
+            self.inputs, second_manifest, "second-day archive", second_day_lesson
+        )
+
+        WRITER.write_review(
+            self.repo,
+            second_manifest_path,
+            "docs/reviews/2026-10-17.md",
+            second_archive_input,
+            second_lessons_input,
+        )
+        lessons = self.lessons.read_text(encoding="utf-8")
+        self.assertIn(f"reviewed-through: {'f' * 40}", lessons.splitlines()[0])
+        self.assertEqual(lessons.count("### L-0001"), 1)
+        self.assertIn("first-day evidence", lessons)
+        self.assertIn("second-day evidence", lessons)
+        self.assertIn("second-day archive", (self.repo / "docs/reviews/2026-10-17.md").read_text(encoding="utf-8"))
+
+    def test_cross_date_union_deduplicates_old_and_new_rows_in_first_seen_order(self) -> None:
+        lesson = "\n".join([
+            "### L-0001 — Stable evidence union",
+            "- **Why:** synthetic regression fixture.",
+            "- **Review evidence:**",
+            "  - `2026-10-16` — [old-a](https://example.invalid/old-a)",
+            "  - `2026-10-16` — [old-a](https://example.invalid/old-a)",
+            "  - `2026-10-17` — [old-b](https://example.invalid/old-b)",
+            "- **Fix or follow-up:** synthetic fixture.",
+            "- **Status:** active",
+        ])
+        self.run_writer("day one", lesson, archive="docs/reviews/2026-10-16.md")
+        second = lesson.replace(
+            "  - `2026-10-17` — [old-b](https://example.invalid/old-b)",
+            "  - `2026-10-17` — [old-b](https://example.invalid/old-b)\n"
+            "  - `2026-10-17` — [old-b](https://example.invalid/old-b)\n"
+            "  - `2026-10-18` — [new-c](https://example.invalid/new-c)",
+        )
+        manifest = make_manifest(from_sha=self.manifest["through"], through="f" * 40)
+        mp, ap, lp = write_inputs(self.inputs, manifest, "day two", second)
+        WRITER.write_review(self.repo, mp, "docs/reviews/2026-10-17.md", ap, lp)
+        rows = [line for line in self.lessons.read_text().splitlines() if line.startswith("  - `")]
+        self.assertEqual(rows, [
+            "  - `2026-10-16` — [old-a](https://example.invalid/old-a)",
+            "  - `2026-10-17` — [old-b](https://example.invalid/old-b)",
+            "  - `2026-10-18` — [new-c](https://example.invalid/new-c)",
+        ])
+
     def test_lesson_write_failure_keeps_old_watermark_and_retry_completes_same_key(self) -> None:
         manifest_path, archive_path, lessons_path = write_inputs(
             self.inputs, self.manifest, "saved archive", "### Retry lesson"
@@ -794,6 +863,151 @@ class FrozenWriterTests(unittest.TestCase):
         with self.assertRaisesRegex(WRITER.WriterError, "parent"):
             WRITER.validate_relative_archive("docs/reviews/../LESSONS.md")
 
+
+    def _dated_lesson(self, rows: str, why: str = "synthetic regression fixture.") -> str:
+        return "\n".join([
+            "### L-0001 — Stable collision fixture",
+            f"- **Why:** {why}",
+            "- **Review evidence:**",
+            rows,
+            "- **Fix or follow-up:** synthetic fixture.",
+            "- **Status:** active",
+        ])
+
+    def test_same_date_different_references_are_retained_and_date_counts_once(self) -> None:
+        lesson = self._dated_lesson("  - `2026-10-16` — [a](https://example.invalid/a)\n  - `2026-10-16` — [b](https://example.invalid/b)")
+        self.run_writer("one", lesson)
+        self.assertEqual(self.lessons.read_text().count("`2026-10-16`"), 2)
+        self.assertEqual(len({line.split("`")[1] for line in self.lessons.read_text().splitlines() if line.startswith("  - `")}), 1)
+
+    def test_merge_accepts_validator_valid_citation_text_and_multiple_links(self) -> None:
+        old_row = "    - `2026-10-16` — context [first](https://example.invalid/a) and [second](https://example.invalid/b)"
+        new_row = "  - `2026-10-17` — inspected [third](https://example.invalid/c); follow-up"
+        old = self._dated_lesson(old_row)
+        self.run_writer("old", old)
+        manifest = make_manifest(from_sha=THROUGH, through="f" * 40)
+        mp, ap, lp = write_inputs(self.inputs, manifest, "new", self._dated_lesson(new_row))
+        WRITER.write_review(self.repo, mp, "docs/reviews/2026-10-17.md", ap, lp)
+        text = self.lessons.read_text()
+        self.assertEqual(text.count(old_row), 1)
+        self.assertEqual(text.count(new_row), 1)
+        self.assertEqual(text.count("### L-0001"), 1)
+        self.assertEqual(PROMOTION_VALIDATOR.validate_documents(
+            text, "<!-- PROMOTED_RULES:START -->\n<!-- PROMOTED_RULES:END -->\n"
+        ), [])
+
+    def test_evidence_shaped_body_text_cannot_be_ignored_in_conflict_comparison(self) -> None:
+        row = "  - `2026-10-16` — [a](https://example.invalid/a)"
+        lesson = self._dated_lesson(row).replace(
+            "- **Review evidence:**", row + "\n- **Review evidence:**"
+        )
+        self.run_writer("old", lesson)
+        before = self.lessons.read_bytes()
+        with self.assertRaisesRegex(WRITER.WriterError, "conflicts"):
+            self.run_writer("new", self._dated_lesson(row))
+        self.assertEqual(self.lessons.read_bytes(), before)
+
+    def test_conflicting_body_rejects_without_changing_archive_lessons_or_standards(self) -> None:
+        lesson = self._dated_lesson("  - `2026-10-16` — [a](https://example.invalid/a)")
+        self.run_writer("original", lesson)
+        standards = self.repo / "docs/code-standards.md"
+        standards.parent.mkdir(parents=True, exist_ok=True)
+        standards.write_text("<!-- PROMOTED_RULES:START -->\n<!-- PROMOTED_RULES:END -->\n", encoding="utf-8")
+        before = {"lessons": self.lessons.read_bytes(), "archive": (self.repo / "docs/reviews/2026-10-16.md").read_bytes(), "standards": standards.read_bytes()}
+        conflicting = lesson.replace("Stable collision fixture", "Changed title")
+        with self.assertRaisesRegex(WRITER.WriterError, "conflicts"):
+            self.run_writer("new archive", conflicting, promoted_lesson_body=lesson.replace("Status: active", "Status: promoted"), promoted_standards_body="##### PS-0001 — Rule\n- **Evidence lessons:** `L-0001`")
+        self.assertEqual(self.lessons.read_bytes(), before["lessons"])
+        self.assertEqual((self.repo / "docs/reviews/2026-10-16.md").read_bytes(), before["archive"])
+        self.assertEqual(standards.read_bytes(), before["standards"])
+
+    def test_same_key_retry_is_byte_stable(self) -> None:
+        lesson = self._dated_lesson("  - `2026-10-16` — [a](https://example.invalid/a)")
+        self.run_writer("same", lesson)
+        first = {p: (self.repo / p).read_bytes() for p in ("LESSONS.md", "docs/reviews/2026-10-16.md")}
+        self.run_writer("same", lesson)
+        self.assertEqual(first["LESSONS.md"], (self.repo / "LESSONS.md").read_bytes())
+        self.assertEqual(first["docs/reviews/2026-10-16.md"], (self.repo / "docs/reviews/2026-10-16.md").read_bytes())
+
+    def test_merge_failure_then_same_key_retry_keeps_all_evidence(self) -> None:
+        old = self._dated_lesson("  - `2026-10-16` — [a](https://example.invalid/a)")
+        self.run_writer("old", old)
+        new = old.replace("  - `2026-10-16` — [a](https://example.invalid/a)", "  - `2026-10-16` — [a](https://example.invalid/a)\n  - `2026-10-17` — [b](https://example.invalid/b)")
+        manifest = make_manifest(from_sha=self.manifest["through"], through="f" * 40)
+        mp, ap, lp = write_inputs(self.inputs, manifest, "new", new)
+        real = WRITER.atomic_write_at
+        def fail_once(fd, name, content, description, expected_snapshot=None):
+            if name == "LESSONS.md":
+                raise WRITER.WriterError("injected merge failure")
+            return real(fd, name, content, description, expected_snapshot)
+        with mock.patch.object(WRITER, "atomic_write_at", side_effect=fail_once):
+            with self.assertRaisesRegex(WRITER.WriterError, "injected merge"):
+                WRITER.write_review(self.repo, mp, "docs/reviews/2026-10-17.md", ap, lp)
+        WRITER.write_review(self.repo, mp, "docs/reviews/2026-10-17.md", ap, lp)
+        text = self.lessons.read_text()
+        self.assertIn("[a]", text); self.assertIn("[b]", text)
+
+    def test_three_distinct_days_promotion_is_unique_and_validator_passes(self) -> None:
+        _, _, standard = promotion_fixture()
+        rows = [f"  - `2026-10-{day:02d}` — [day {day}](https://example.invalid/{day})" for day in (1, 2, 3)]
+        for index, row in enumerate(rows):
+            if index:
+                self.manifest = make_manifest(from_sha=self.manifest["through"], through=str(index + 1) * 40)
+            self.run_writer(f"day {index + 1}", self._dated_lesson(row), archive=f"docs/reviews/2026-10-0{index + 1}.md")
+            self.assertEqual(self.lessons.read_text().count("### L-0001"), 1)
+        promoted = self._dated_lesson("\n".join(rows)).replace(
+            "- **Status:** active", "- **Status:** promoted"
+        ) + "\n- **Promoted rule:** PS-0001\n- **Promotion date:** 2026-10-04"
+        self.manifest = make_manifest(from_sha=self.manifest["through"], through="4" * 40)
+        standards = self.repo / "docs/code-standards.md"
+        standards.parent.mkdir(parents=True, exist_ok=True)
+        standards.write_text("<!-- PROMOTED_RULES:START -->\n<!-- PROMOTED_RULES:END -->\n", encoding="utf-8")
+        self.run_writer("promotion", "", promoted_lesson_body=promoted, promoted_standards_body=standard)
+        self.assertEqual(PROMOTION_VALIDATOR.validate_documents(self.lessons.read_text(), standards.read_text()), [])
+        self.assertEqual(self.lessons.read_text().count("### L-0001"), 1)
+
+    def test_merge_published_before_watermark_failure_can_be_retried(self) -> None:
+        old_row = "  - `2026-10-16` — [a](https://example.invalid/a)"
+        new_row = "  - `2026-10-17` — [b](https://example.invalid/b)"
+        self.run_writer("old", self._dated_lesson(old_row))
+        manifest = make_manifest(from_sha=THROUGH, through="f" * 40)
+        mp, ap, lp = write_inputs(self.inputs, manifest, "new", self._dated_lesson(new_row))
+        real_write = WRITER.atomic_write_at
+        def fail_final(fd, name, content, description, expected_snapshot=None):
+            if description == "LESSONS.md reviewed-through final write":
+                raise WRITER.WriterError("injected final watermark failure")
+            return real_write(fd, name, content, description, expected_snapshot)
+        with mock.patch.object(WRITER, "atomic_write_at", side_effect=fail_final):
+            with self.assertRaisesRegex(WRITER.WriterError, "injected final"):
+                WRITER.write_review(self.repo, mp, "docs/reviews/2026-10-17.md", ap, lp)
+        self.assertIn(f"reviewed-through: {THROUGH}", self.lessons.read_text().splitlines()[0])
+        self.assertIn(new_row, self.lessons.read_text())
+        WRITER.write_review(self.repo, mp, "docs/reviews/2026-10-17.md", ap, lp)
+        complete = self.lessons.read_bytes()
+        WRITER.write_review(self.repo, mp, "docs/reviews/2026-10-17.md", ap, lp)
+        self.assertEqual(self.lessons.read_bytes(), complete)
+        self.assertEqual(self.lessons.read_text().count(old_row), 1)
+        self.assertEqual(self.lessons.read_text().count(new_row), 1)
+
+    def test_malformed_collision_record_is_rejected_without_watermark_progress(self) -> None:
+        malformed = "#### L-0001 — Wrong heading\n- **Why:** x\n- **Review evidence:**\n  - `2026-10-16` — [a](https://example.invalid/a)"
+        self.seed_active_lesson(malformed)
+        incoming = self._dated_lesson("  - `2026-10-17` — [b](https://example.invalid/b)")
+        before = self.lessons.read_bytes()
+        with self.assertRaises(WRITER.WriterError):
+            self.run_writer("archive", incoming)
+        self.assertEqual(self.lessons.read_bytes(), before)
+        self.assertIn(f"reviewed-through: {FROM}", self.lessons.read_text().splitlines()[0])
+
+    def test_final_global_duplicate_scan_rejects_before_watermark(self) -> None:
+        active = self._dated_lesson("  - `2026-10-16` — [a](https://example.invalid/a)")
+        promoted = active.replace("- **Status:** active", "- **Status:** promoted")
+        document = self.lessons.read_text().replace("<!-- ACTIVE_LESSONS:END -->", "<!-- frozen-review-lessons: sha256:" + "d" * 64 + " -->\n" + active + "\n<!-- /frozen-review-lessons: sha256:" + "d" * 64 + " -->\n<!-- ACTIVE_LESSONS:END -->").replace("<!-- PROMOTED_LESSONS:END -->", promoted + "\n<!-- PROMOTED_LESSONS:END -->")
+        self.lessons.write_text(document)
+        before = self.lessons.read_bytes()
+        with self.assertRaisesRegex(WRITER.WriterError, "duplicate Lesson ID"):
+            self.run_writer("archive", "")
+        self.assertEqual(self.lessons.read_bytes(), before)
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

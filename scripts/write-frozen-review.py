@@ -14,6 +14,7 @@ import secrets
 import stat
 import subprocess
 import sys
+from datetime import date
 from pathlib import Path
 from typing import Any
 
@@ -767,6 +768,150 @@ def remove_promoted_from_active(section: bytes, promoted_ids: set[str]) -> tuple
     return b"".join(lines), counts
 
 
+def _lesson_records(section: bytes, start_re: re.Pattern[bytes], end_re: re.Pattern[bytes]) -> list[tuple[str, int, int, bool]]:
+    lines, blocks = range_block_spans(section, start_re, end_re)
+    managed = {i for start, end, _key in blocks for i in range(start + 1, end)}
+    headings: list[int] = []
+    ids: list[str] = []
+    for i, line in enumerate(lines):
+        text = line.decode("utf-8", errors="strict").rstrip("\r\n")
+        # Legacy records without a stable ID remain compatible, but any line
+        # that claims to be an L-record must use the canonical heading shape.
+        if re.match(r"^[ \t]*#+[ \t]*L-", text):
+            match = PROMOTION_HEADING.fullmatch(text)
+            if match is None:
+                raise WriterError("Lessons contains a malformed Lesson heading")
+            headings.append(i)
+            ids.append(match.group(1))
+    marker_lines = [i for i, line in enumerate(lines) if end_re.fullmatch(line.rstrip(b"\r\n"))]
+    records = []
+    for n, (lesson_id, start) in enumerate(zip(ids, headings)):
+        candidates = [headings[n + 1] if n + 1 < len(headings) else len(lines)]
+        candidates.extend(i for i in marker_lines if i > start)
+        records.append((lesson_id, start, min(candidates), start in managed))
+    return records
+
+def validate_global_lesson_uniqueness(active_section: bytes, promoted_section: bytes) -> None:
+    """Reject duplicate IDs across the complete bounded authoritative sections."""
+    locations: dict[str, str] = {}
+    for section_name, section, start_re, end_re in (
+        ("active", active_section, LESSON_START, LESSON_END),
+        ("promoted", promoted_section, PROMOTED_LESSON_START, PROMOTED_LESSON_END),
+    ):
+        for lesson_id, _start, _end, _managed in _lesson_records(section, start_re, end_re):
+            previous = locations.get(lesson_id)
+            if previous is not None:
+                raise WriterError(f"duplicate Lesson ID {lesson_id} across {previous} and {section_name} Lessons")
+            locations[lesson_id] = f"{section_name} Lessons"
+
+def _evidence_row_indexes(record: bytes, label: str) -> list[int]:
+    indexes: list[int] = []
+    in_evidence = False
+    headers = 0
+    for index, line in enumerate(record.splitlines(keepends=True)):
+        plain = line.rstrip(b"\r\n")
+        if plain.strip() == b"- **Review evidence:**":
+            headers += 1
+            if headers > 1:
+                raise WriterError(f"{label} contains duplicate Review evidence headers")
+            in_evidence = True
+            continue
+        if in_evidence and re.match(rb"^- \*\*[^*]+:\*\*", plain):
+            in_evidence = False
+        if in_evidence and plain.strip():
+            # Match the persisted validator's date + citation-text language.
+            match = re.fullmatch(r"\s{2,}- `([0-9]{4}-[0-9]{2}-[0-9]{2})` — (.+?)\s*", plain.decode("utf-8"))
+            if match is None:
+                raise WriterError(f"{label} contains malformed Review evidence row")
+            try:
+                date.fromisoformat(match.group(1))
+            except ValueError as exc:
+                raise WriterError(f"{label} contains an invalid Review evidence date") from exc
+            links = re.findall(r"\[[^\]]+\]\(([^)]+)\)", match.group(2))
+            if not links or any(not link.strip() or "<" in link or ">" in link for link in links):
+                raise WriterError(f"{label} evidence row requires a non-placeholder Markdown link")
+            indexes.append(index)
+    if headers != 1:
+        raise WriterError(f"{label} must contain exactly one Review evidence section")
+    if not indexes:
+        raise WriterError(f"{label} must contain at least one Review evidence row")
+    return indexes
+
+
+def _evidence_rows(record: bytes, label: str) -> list[bytes]:
+    lines = record.splitlines(keepends=True)
+    return [lines[index] for index in _evidence_row_indexes(record, label)]
+
+def _body_without_evidence(record: bytes, label: str) -> bytes:
+    indexes = set(_evidence_row_indexes(record, label))
+    kept = [line for index, line in enumerate(record.splitlines(keepends=True)) if index not in indexes]
+    while kept and not kept[-1].strip():
+        kept.pop()
+    return b"".join(kept).rstrip(b"\r\n")
+
+def merge_existing_lesson_evidence(section: bytes, body: bytes, key: str) -> bytes:
+    """Merge only exact-body records; reject unmanaged/user-edited collisions."""
+    existing = {lesson_id: (start, end, managed) for lesson_id, start, end, managed in _lesson_records(section, LESSON_START, LESSON_END)}
+    new_lines = body.splitlines(keepends=True)
+    new_starts = [i for i, line in enumerate(new_lines) if line.startswith(b"### ")]
+    if not new_starts:
+        return body
+    replacements: dict[str, bytes] = {}
+    for n, start in enumerate(new_starts):
+        end = new_starts[n + 1] if n + 1 < len(new_starts) else len(new_lines)
+        record = b"".join(new_lines[start:end])
+        match = PROMOTION_HEADING.fullmatch(new_lines[start].decode("utf-8").rstrip("\r\n"))
+        if match is None:
+            continue
+        lesson_id = match.group(1)
+        if lesson_id not in existing:
+            continue
+        old_start, old_end, managed = existing[lesson_id]
+        if not managed:
+            raise WriterError(f"Lesson {lesson_id} exists outside a writer-managed range block")
+        old = b"".join(section.splitlines(keepends=True)[old_start:old_end])
+        if _body_without_evidence(old, "existing Lesson") != _body_without_evidence(record, "active Lessons"):
+            raise WriterError(f"Lesson {lesson_id} body conflicts with existing record")
+        old_rows = _evidence_rows(old, "existing Lesson")
+        new_rows = _evidence_rows(record, "active Lessons")
+        # Stable union over the complete old-then-new sequence.  This both
+        # repairs duplicates already persisted in the old record and retains
+        # every distinct citation, including same-date citations.
+        union: list[bytes] = []
+        seen: set[bytes] = set()
+        for row in old_rows + new_rows:
+            if row not in seen:
+                seen.add(row)
+                union.append(row)
+        old_lines = old.splitlines(keepends=True)
+        old_indexes = set(_evidence_row_indexes(old, "existing Lesson"))
+        old_lines = [line for index, line in enumerate(old_lines) if index not in old_indexes]
+        header = next(i for i, line in enumerate(old_lines) if line.strip() == b"- **Review evidence:**")
+        old_lines[header + 1:header + 1] = union
+        replacements[lesson_id] = b"".join(old_lines)
+    if not replacements:
+        return body
+    out = list(new_lines)
+    for n, start in reversed(list(enumerate(new_starts))):
+        end = new_starts[n + 1] if n + 1 < len(new_starts) else len(out)
+        heading = out[start].decode("utf-8").rstrip("\r\n")
+        match = PROMOTION_HEADING.fullmatch(heading)
+        if match and match.group(1) in replacements:
+            out[start:end] = [replacements[match.group(1)]]
+    return b"".join(out)
+
+
+def remove_existing_managed_lessons(section: bytes, ids: set[str]) -> bytes:
+    lines, _blocks = range_block_spans(section, LESSON_START, LESSON_END)
+    records = _lesson_records(section, LESSON_START, LESSON_END)
+    for lesson_id, start, end, managed in sorted(records, key=lambda item: item[1], reverse=True):
+        if lesson_id not in ids:
+            continue
+        if not managed:
+            raise WriterError(f"Lesson {lesson_id} exists outside a writer-managed range block")
+        del lines[start:end]
+    return b"".join(lines)
+
 def update_promoted_standards(document: bytes, key: str, body: bytes) -> bytes:
     lines = document.splitlines(keepends=True)
     start_marker = b"<!-- PROMOTED_RULES:START -->"
@@ -840,6 +985,10 @@ def update_lessons(
     active_section = b"".join(lines[active + 1 : active_section_end])
     promoted_section = b"".join(lines[promoted + 1 : promoted_section_end])
     active_input_ids = set(lesson_ids_in_content(body, "active Lessons"))
+    validate_global_lesson_uniqueness(active_section, promoted_section)
+    body = merge_existing_lesson_evidence(active_section, body, key)
+    active_input_ids = set(lesson_ids_in_content(body, "active Lessons"))
+    active_section = remove_existing_managed_lessons(active_section, active_input_ids)
     existing_promoted_ids = set(lesson_ids_in_content(promoted_section, "existing promoted Lessons"))
     reintroduced_ids = active_input_ids & existing_promoted_ids
     if reintroduced_ids:
@@ -909,11 +1058,24 @@ def update_lessons(
         active_start,
         active_end_line,
     )
+    validate_global_lesson_uniqueness(active_section, promoted_section)
     document = _replace_lesson_section_content(document, "ACTIVE_LESSONS", active_section)
     current_marker, _, _ = marker_value(document)
     if current_marker != marker:
         raise WriterError("Lessons updater unexpectedly changed reviewed-through")
     return document
+
+
+def validate_lessons_document_uniqueness(document: bytes) -> None:
+    lines = document.splitlines(keepends=True)
+    active, active_end = lesson_section_markers(lines, "ACTIVE_LESSONS")
+    promoted, promoted_end = lesson_section_markers(lines, "PROMOTED_LESSONS")
+    active_end = active_end if active_end is not None else promoted
+    promoted_end = promoted_end if promoted_end is not None else len(lines)
+    validate_global_lesson_uniqueness(
+        b"".join(lines[active + 1:active_end]),
+        b"".join(lines[promoted + 1:promoted_end]),
+    )
 
 
 def set_watermark(document: bytes, target: str) -> bytes:
@@ -1117,6 +1279,9 @@ def write_review(
                 PROMOTED_STANDARD_END,
             )
 
+        # Re-scan the complete authoritative sections immediately before the
+        # final watermark write, not only the sections touched by this update.
+        validate_lessons_document_uniqueness(check_lessons)
         final_lessons = set_watermark(check_lessons, manifest["through"])
         # No file write follows this atomic replacement. On retry where the marker
         # already equals through, this is still the final durable write for the key.

@@ -767,23 +767,121 @@ def remove_promoted_from_active(section: bytes, promoted_ids: set[str]) -> tuple
     return b"".join(lines), counts
 
 
-def validate_global_lesson_uniqueness(active_section: bytes, promoted_section: bytes) -> None:
-    """Reject duplicate IDs across the authoritative bounded Lessons sections."""
-    locations: dict[str, str] = {}
-    for section_name, section in (("active", active_section), ("promoted", promoted_section)):
-        start_re, end_re = (LESSON_START, LESSON_END) if section_name == "active" else (
-            PROMOTED_LESSON_START,
-            PROMOTED_LESSON_END,
-        )
-        lines, blocks = range_block_spans(section, start_re, end_re)
-        for block_start, block_end, _key in blocks:
-            block_body = b"".join(lines[block_start + 1 : block_end])
-            for lesson_id in lesson_ids_in_content(block_body, f"{section_name} Lessons"):
-                previous = locations.get(lesson_id)
-                if previous is not None:
-                    raise WriterError(f"duplicate Lesson ID {lesson_id} across {previous} and {section_name} Lessons")
-                locations[lesson_id] = f"{section_name} Lessons"
+def _lesson_records(section: bytes, start_re: re.Pattern[bytes], end_re: re.Pattern[bytes]) -> list[tuple[str, int, int, bool]]:
+    lines, blocks = range_block_spans(section, start_re, end_re)
+    managed = {i for start, end, _key in blocks for i in range(start + 1, end)}
+    headings: list[int] = []
+    ids: list[str] = []
+    for i, line in enumerate(lines):
+        text = line.decode("utf-8", errors="strict").rstrip("\r\n")
+        if text.startswith("### L-"):
+            match = PROMOTION_HEADING.fullmatch(text)
+            if match is None:
+                raise WriterError("Lessons contains a malformed Lesson heading")
+            headings.append(i); ids.append(match.group(1))
+    marker_lines = [i for i, line in enumerate(lines) if end_re.fullmatch(line.rstrip(b"\r\n"))]
+    records = []
+    for n, (lesson_id, start) in enumerate(zip(ids, headings)):
+        candidates = [headings[n + 1] if n + 1 < len(headings) else len(lines)]
+        candidates.extend(i for i in marker_lines if i > start)
+        records.append((lesson_id, start, min(candidates), start in managed))
+    return records
 
+def validate_global_lesson_uniqueness(active_section: bytes, promoted_section: bytes) -> None:
+    """Reject duplicate IDs across the complete bounded authoritative sections."""
+    locations: dict[str, str] = {}
+    for section_name, section, start_re, end_re in (
+        ("active", active_section, LESSON_START, LESSON_END),
+        ("promoted", promoted_section, PROMOTED_LESSON_START, PROMOTED_LESSON_END),
+    ):
+        for lesson_id, _start, _end, _managed in _lesson_records(section, start_re, end_re):
+            previous = locations.get(lesson_id)
+            if previous is not None:
+                raise WriterError(f"duplicate Lesson ID {lesson_id} across {previous} and {section_name} Lessons")
+            locations[lesson_id] = f"{section_name} Lessons"
+
+def _evidence_rows(record: bytes, label: str) -> list[bytes]:
+    rows: list[bytes] = []
+    in_evidence = False
+    for line in record.splitlines(keepends=True):
+        plain = line.rstrip(b"\r\n")
+        if plain == b"- **Review evidence:**":
+            in_evidence = True; continue
+        if in_evidence and plain.startswith(b"- **"):
+            in_evidence = False
+        if in_evidence and plain.startswith(b"  - "):
+            if re.fullmatch(rb"  - `[0-9]{4}-[0-9]{2}-[0-9]{2}` .*\[[^\]]+\]\([^\)]+\)", plain) is None:
+                raise WriterError(f"{label} contains malformed Review evidence row")
+            rows.append(line)
+    return rows
+
+def _body_without_evidence(record: bytes, label: str) -> bytes:
+    rows = set(_evidence_rows(record, label))
+    kept = [line for line in record.splitlines(keepends=True) if line not in rows]
+    while kept and not kept[-1].strip():
+        kept.pop()
+    return b"".join(kept).rstrip(b"\r\n")
+
+def merge_existing_lesson_evidence(section: bytes, body: bytes, key: str) -> bytes:
+    """Merge only exact-body records; reject unmanaged/user-edited collisions."""
+    existing = {lesson_id: (start, end, managed) for lesson_id, start, end, managed in _lesson_records(section, LESSON_START, LESSON_END)}
+    new_lines = body.splitlines(keepends=True)
+    new_starts = [i for i, line in enumerate(new_lines) if line.startswith(b"### ")]
+    if not new_starts:
+        return body
+    replacements: dict[str, bytes] = {}
+    for n, start in enumerate(new_starts):
+        end = new_starts[n + 1] if n + 1 < len(new_starts) else len(new_lines)
+        record = b"".join(new_lines[start:end])
+        match = PROMOTION_HEADING.fullmatch(new_lines[start].decode("utf-8").rstrip("\r\n"))
+        if match is None:
+            continue
+        lesson_id = match.group(1)
+        if lesson_id not in existing:
+            continue
+        old_start, old_end, managed = existing[lesson_id]
+        if not managed:
+            raise WriterError(f"Lesson {lesson_id} exists outside a writer-managed range block")
+        old = b"".join(section.splitlines(keepends=True)[old_start:old_end])
+        if _body_without_evidence(old, "existing Lesson") != _body_without_evidence(record, "active Lessons"):
+            raise WriterError(f"Lesson {lesson_id} body conflicts with existing record")
+        old_rows = _evidence_rows(old, "existing Lesson")
+        new_rows = _evidence_rows(record, "active Lessons")
+        additions = [row for row in new_rows if row not in old_rows]
+        if additions:
+            old_lines = old.splitlines(keepends=True)
+            insert = next((i for i, line in enumerate(old_lines) if line.rstrip(b"\r\n") == b"- **Review evidence:**"), None)
+            if insert is None:
+                raise WriterError(f"Lesson {lesson_id} has no structured Review evidence section")
+            insert += 1
+            while insert < len(old_lines) and old_lines[insert].startswith(b"  - "):
+                insert += 1
+            old_lines[insert:insert] = additions
+            replacements[lesson_id] = b"".join(old_lines)
+        else:
+            replacements[lesson_id] = old
+    if not replacements:
+        return body
+    out = list(new_lines)
+    for n, start in reversed(list(enumerate(new_starts))):
+        end = new_starts[n + 1] if n + 1 < len(new_starts) else len(out)
+        heading = out[start].decode("utf-8").rstrip("\r\n")
+        match = PROMOTION_HEADING.fullmatch(heading)
+        if match and match.group(1) in replacements:
+            out[start:end] = [replacements[match.group(1)]]
+    return b"".join(out)
+
+
+def remove_existing_managed_lessons(section: bytes, ids: set[str]) -> bytes:
+    lines, _blocks = range_block_spans(section, LESSON_START, LESSON_END)
+    records = _lesson_records(section, LESSON_START, LESSON_END)
+    for lesson_id, start, end, managed in sorted(records, key=lambda item: item[1], reverse=True):
+        if lesson_id not in ids:
+            continue
+        if not managed:
+            raise WriterError(f"Lesson {lesson_id} exists outside a writer-managed range block")
+        del lines[start:end]
+    return b"".join(lines)
 
 def update_promoted_standards(document: bytes, key: str, body: bytes) -> bytes:
     lines = document.splitlines(keepends=True)
@@ -858,6 +956,10 @@ def update_lessons(
     active_section = b"".join(lines[active + 1 : active_section_end])
     promoted_section = b"".join(lines[promoted + 1 : promoted_section_end])
     active_input_ids = set(lesson_ids_in_content(body, "active Lessons"))
+    validate_global_lesson_uniqueness(active_section, promoted_section)
+    body = merge_existing_lesson_evidence(active_section, body, key)
+    active_input_ids = set(lesson_ids_in_content(body, "active Lessons"))
+    active_section = remove_existing_managed_lessons(active_section, active_input_ids)
     existing_promoted_ids = set(lesson_ids_in_content(promoted_section, "existing promoted Lessons"))
     reintroduced_ids = active_input_ids & existing_promoted_ids
     if reintroduced_ids:

@@ -622,7 +622,7 @@ class FrozenWriterTests(unittest.TestCase):
         self.assertEqual((review_dir / ".rollback-retained").read_text(encoding="utf-8"), "preserve rollback artifact\n")
         self.assertEqual((review_dir / ".flywheel-retained").read_text(encoding="utf-8"), "preserve ordinary hidden file\n")
 
-    def test_cross_date_duplicate_lesson_id_fails_closed_before_second_watermark(self) -> None:
+    def test_cross_date_same_body_merges_evidence_and_advances_watermark(self) -> None:
         lesson = "\n".join(
             [
                 "### L-0001 — Preserve evidence across review dates",
@@ -649,20 +649,19 @@ class FrozenWriterTests(unittest.TestCase):
             self.inputs, second_manifest, "second-day archive", second_day_lesson
         )
 
-        with self.assertRaisesRegex(WRITER.WriterError, "duplicate Lesson ID L-0001"):
-            WRITER.write_review(
-                self.repo,
-                second_manifest_path,
-                "docs/reviews/2026-10-17.md",
-                second_archive_input,
-                second_lessons_input,
-            )
-
+        WRITER.write_review(
+            self.repo,
+            second_manifest_path,
+            "docs/reviews/2026-10-17.md",
+            second_archive_input,
+            second_lessons_input,
+        )
         lessons = self.lessons.read_text(encoding="utf-8")
-        self.assertIn(f"reviewed-through: {first_through}", lessons.splitlines()[0])
+        self.assertIn(f"reviewed-through: {'f' * 40}", lessons.splitlines()[0])
         self.assertEqual(lessons.count("### L-0001"), 1)
-        self.assertIn("first-day archive", (self.repo / "docs/reviews/2026-10-16.md").read_text(encoding="utf-8"))
-        self.assertFalse((self.repo / "docs/reviews/2026-10-17.md").exists())
+        self.assertIn("first-day evidence", lessons)
+        self.assertIn("second-day evidence", lessons)
+        self.assertIn("second-day archive", (self.repo / "docs/reviews/2026-10-17.md").read_text(encoding="utf-8"))
 
     def test_lesson_write_failure_keeps_old_watermark_and_retry_completes_same_key(self) -> None:
         manifest_path, archive_path, lessons_path = write_inputs(

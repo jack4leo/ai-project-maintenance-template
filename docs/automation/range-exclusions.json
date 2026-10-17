@@ -1,5 +1,5 @@
 {
-  "policy_version": 2,
+  "policy_version": 3,
   "rules": [
     {
       "id": "generated-output",
@@ -18,7 +18,7 @@
       "id": "generated-data-paths",
       "kind": "path-prefix",
       "paths": [],
-      "reason": "Exclude generated data content only beneath repository-relative file or directory paths explicitly listed by a maintainer; an empty list adds no project-specific generated-data exclusions."
+      "reason": "Exclude generated data content only beneath repository-relative file or directory paths explicitly listed by a maintainer, with a concrete producer process and exclusion rationale when populated; producers may be training, intermediate-stage, ETL, script, runtime, or other generation processes. An empty list adds no project-specific generated-data exclusions."
     },
     {
       "id": "binary-nul-content",

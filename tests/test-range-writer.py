@@ -199,7 +199,7 @@ class FrozenWriterTests(unittest.TestCase):
         policy_path.write_text(
             json.dumps(
                 {
-                    "policy_version": 2,
+                    "policy_version": 3,
                     "rules": [
                         {
                             "id": "review-records",
@@ -211,6 +211,7 @@ class FrozenWriterTests(unittest.TestCase):
                             "id": "generated-data-paths",
                             "kind": "path-prefix",
                             "paths": ["data/generated"],
+                            "producer": "ETL snapshot materializer",
                             "reason": "only this explicit generated-data directory is excluded",
                         }
                     ],
@@ -241,6 +242,8 @@ class FrozenWriterTests(unittest.TestCase):
 
         manifest = FREEZER.freeze_range(self.repo)
         self.assertEqual(manifest["from"], from_sha)
+        self.assertEqual(manifest["exclusion_policy"]["policy_version"], 3)
+        self.assertEqual(next(rule for rule in manifest["exclusion_policy"]["rules"] if rule["id"] == "generated-data-paths")["producer"], "ETL snapshot materializer")
         self.assertEqual(len(manifest["excluded_paths"]), 2)
         self.assertIn(manifest["through"], {item["sha"] for item in manifest["commits"]})
         excluded_paths = {record["path"] for record in manifest["excluded_paths"]}
@@ -261,6 +264,44 @@ class FrozenWriterTests(unittest.TestCase):
         self.assertIn(f"reviewed-through: {manifest['through']}", self.lessons.read_text(encoding="utf-8").splitlines()[0])
         self.assertTrue((review_dir / "2026-10-17.md").exists())
 
+    def test_writer_loads_legacy_v2_and_v3_empty_and_populated_prefixes(self) -> None:
+        for version, paths, producer in (
+            (2, ["legacy/output"], None),
+            (3, [], None),
+            (3, [], "future stage; no paths approved"),
+            (3, ["training/checkpoints"], "train.py writes checkpoint data after each epoch"),
+        ):
+            with self.subTest(version=version, paths=paths, producer=producer):
+                manifest = make_manifest()
+                rule = {"id": "output", "kind": "path-prefix", "paths": paths, "reason": "explicit decision"}
+                if producer is not None:
+                    rule["producer"] = producer
+                manifest["exclusion_policy"]["policy_version"] = version
+                manifest["exclusion_policy"]["rules"] = [rule]
+                reseal_manifest(manifest)
+                manifest_path, _, _ = write_inputs(self.inputs, manifest, "archive", "")
+                self.assertEqual(WRITER.load_manifest(manifest_path), manifest)
+
+    def test_writer_rejects_invalid_v3_producers_even_with_resealed_key(self) -> None:
+        for paths in ([], ["training/checkpoints"]):
+            for producer in (None, "", "  ", 7, [], {}):
+                with self.subTest(paths=paths, producer=producer):
+                    manifest = make_manifest()
+                    manifest["exclusion_policy"]["policy_version"] = 3
+                    manifest["exclusion_policy"]["rules"] = [{
+                        "id": "output", "kind": "path-prefix", "paths": paths,
+                        "producer": producer, "reason": "explicit decision",
+                    }]
+                    reseal_manifest(manifest)
+                    manifest_path, _, _ = write_inputs(self.inputs, manifest, "archive", "")
+                    with self.assertRaisesRegex(WRITER.WriterError, "producer"):
+                        WRITER.load_manifest(manifest_path)
+        manifest["exclusion_policy"]["rules"][0].pop("producer")
+        reseal_manifest(manifest)
+        manifest_path, _, _ = write_inputs(self.inputs, manifest, "archive", "")
+        with self.assertRaisesRegex(WRITER.WriterError, "producer"):
+            WRITER.load_manifest(manifest_path)
+
     def test_nested_manifest_schema_rejects_non_freezer_shapes_even_with_resealed_key(self) -> None:
         cases: list[tuple[str, dict[str, object]]] = []
         bad_commit = json.loads(json.dumps(self.manifest))
@@ -280,6 +321,10 @@ class FrozenWriterTests(unittest.TestCase):
             }
         ]
         cases.append(("path-prefix policy", bad_prefix))
+        bad_producer = json.loads(json.dumps(self.manifest))
+        bad_producer["exclusion_policy"]["policy_version"] = 3
+        bad_producer["exclusion_policy"]["rules"] = [{"id": "generated-data-paths", "kind": "path-prefix", "paths": ["data/generated"], "producer": "", "reason": "generated"}]
+        cases.append(("empty producer", bad_producer))
         bad_exclusion = json.loads(json.dumps(self.manifest))
         bad_exclusion["excluded_paths"] = [{"unexpected": "record"}]
         cases.append(("excluded-path record", bad_exclusion))
@@ -290,7 +335,7 @@ class FrozenWriterTests(unittest.TestCase):
                 manifest_path, archive_path, lessons_path = write_inputs(
                     self.inputs, bad, f"bad-{index}", f"bad-{index}"
                 )
-                with self.assertRaisesRegex(WRITER.WriterError, "malformed|unexpected|rules"):
+                with self.assertRaisesRegex(WRITER.WriterError, "malformed|unexpected|rules|producer"):
                     WRITER.write_review(
                         self.repo,
                         manifest_path,

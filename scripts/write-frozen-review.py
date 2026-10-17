@@ -132,7 +132,7 @@ def validate_manifest_nested(value: dict[str, Any], oid_length: int) -> None:
     if policy["source_path"] != POLICY_PATH:
         raise WriterError("manifest exclusion policy source path is invalid")
     policy_version = policy["policy_version"]
-    if type(policy_version) is not int or policy_version not in {1, 2}:
+    if type(policy_version) is not int or policy_version not in {1, 2, 3}:
         raise WriterError("manifest exclusion policy version is unsupported")
     if not _is_object_id(policy["source_commit"], oid_length) or not _is_object_id(policy["source_blob"], oid_length):
         raise WriterError("manifest exclusion policy source IDs are malformed")
@@ -157,6 +157,8 @@ def validate_manifest_nested(value: dict[str, Any], oid_length: int) -> None:
             if kind == "path-prefix"
             else {"id", "kind", "reason"}
         )
+        if kind == "path-prefix" and policy_version >= 3 and "producer" in rule:
+            expected.add("producer")
         if set(rule) != expected:
             raise WriterError("manifest exclusion policy rule has unexpected or missing fields")
         if kind == "path-prefix" and policy_version < 2:
@@ -183,6 +185,13 @@ def validate_manifest_nested(value: dict[str, Any], oid_length: int) -> None:
                 or len(set(paths)) != len(paths)
             ):
                 raise WriterError("manifest exclusion policy path-prefix paths are malformed")
+            if policy_version >= 3:
+                if paths and "producer" not in rule:
+                    raise WriterError("manifest path-prefix rule with paths must describe a concrete producer process")
+                if "producer" in rule and (
+                    not isinstance(rule["producer"], str) or not rule["producer"].strip()
+                ):
+                    raise WriterError("manifest path-prefix producer must be a non-empty process description")
         rules_by_id[rule_id] = rule
 
     excluded_paths = value["excluded_paths"]

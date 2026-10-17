@@ -14,6 +14,7 @@ import secrets
 import stat
 import subprocess
 import sys
+from datetime import date
 from pathlib import Path
 from typing import Any
 
@@ -774,11 +775,14 @@ def _lesson_records(section: bytes, start_re: re.Pattern[bytes], end_re: re.Patt
     ids: list[str] = []
     for i, line in enumerate(lines):
         text = line.decode("utf-8", errors="strict").rstrip("\r\n")
-        if text.startswith("### L-"):
+        # Legacy records without a stable ID remain compatible, but any line
+        # that claims to be an L-record must use the canonical heading shape.
+        if re.match(r"^#{3,}\s+L-", text):
             match = PROMOTION_HEADING.fullmatch(text)
             if match is None:
                 raise WriterError("Lessons contains a malformed Lesson heading")
-            headings.append(i); ids.append(match.group(1))
+            headings.append(i)
+            ids.append(match.group(1))
     marker_lines = [i for i, line in enumerate(lines) if end_re.fullmatch(line.rstrip(b"\r\n"))]
     records = []
     for n, (lesson_id, start) in enumerate(zip(ids, headings)):
@@ -803,16 +807,30 @@ def validate_global_lesson_uniqueness(active_section: bytes, promoted_section: b
 def _evidence_rows(record: bytes, label: str) -> list[bytes]:
     rows: list[bytes] = []
     in_evidence = False
+    headers = 0
     for line in record.splitlines(keepends=True):
         plain = line.rstrip(b"\r\n")
         if plain == b"- **Review evidence:**":
-            in_evidence = True; continue
+            headers += 1
+            if headers > 1:
+                raise WriterError(f"{label} contains duplicate Review evidence headers")
+            in_evidence = True
+            continue
         if in_evidence and plain.startswith(b"- **"):
             in_evidence = False
+        if in_evidence and plain.strip() and not plain.startswith(b"  - "):
+            raise WriterError(f"{label} contains malformed Review evidence row")
         if in_evidence and plain.startswith(b"  - "):
-            if re.fullmatch(rb"  - `[0-9]{4}-[0-9]{2}-[0-9]{2}` .*\[[^\]]+\]\([^\)]+\)", plain) is None:
+            match = re.fullmatch(rb"  - `([0-9]{4}-[0-9]{2}-[0-9]{2})` \xe2\x80\x94 \[[^\]]+\]\([^\)]+\)", plain)
+            if match is None:
                 raise WriterError(f"{label} contains malformed Review evidence row")
+            try:
+                date.fromisoformat(match.group(1).decode("ascii"))
+            except ValueError as exc:
+                raise WriterError(f"{label} contains an invalid Review evidence date") from exc
             rows.append(line)
+    if headers != 1:
+        raise WriterError(f"{label} must contain exactly one Review evidence section")
     return rows
 
 def _body_without_evidence(record: bytes, label: str) -> bytes:
@@ -847,19 +865,21 @@ def merge_existing_lesson_evidence(section: bytes, body: bytes, key: str) -> byt
             raise WriterError(f"Lesson {lesson_id} body conflicts with existing record")
         old_rows = _evidence_rows(old, "existing Lesson")
         new_rows = _evidence_rows(record, "active Lessons")
-        additions = [row for row in new_rows if row not in old_rows]
-        if additions:
-            old_lines = old.splitlines(keepends=True)
-            insert = next((i for i, line in enumerate(old_lines) if line.rstrip(b"\r\n") == b"- **Review evidence:**"), None)
-            if insert is None:
-                raise WriterError(f"Lesson {lesson_id} has no structured Review evidence section")
-            insert += 1
-            while insert < len(old_lines) and old_lines[insert].startswith(b"  - "):
-                insert += 1
-            old_lines[insert:insert] = additions
-            replacements[lesson_id] = b"".join(old_lines)
-        else:
-            replacements[lesson_id] = old
+        # Stable union over the complete old-then-new sequence.  This both
+        # repairs duplicates already persisted in the old record and retains
+        # every distinct citation, including same-date citations.
+        union: list[bytes] = []
+        seen: set[bytes] = set()
+        for row in old_rows + new_rows:
+            if row not in seen:
+                seen.add(row)
+                union.append(row)
+        old_lines = old.splitlines(keepends=True)
+        header = next(i for i, line in enumerate(old_lines) if line.rstrip(b"\r\n") == b"- **Review evidence:**")
+        old_lines = [line for line in old_lines if line not in old_rows]
+        header = next(i for i, line in enumerate(old_lines) if line.rstrip(b"\r\n") == b"- **Review evidence:**")
+        old_lines[header + 1:header + 1] = union
+        replacements[lesson_id] = b"".join(old_lines)
     if not replacements:
         return body
     out = list(new_lines)
@@ -1035,6 +1055,18 @@ def update_lessons(
     if current_marker != marker:
         raise WriterError("Lessons updater unexpectedly changed reviewed-through")
     return document
+
+
+def validate_lessons_document_uniqueness(document: bytes) -> None:
+    lines = document.splitlines(keepends=True)
+    active, active_end = lesson_section_markers(lines, "ACTIVE_LESSONS")
+    promoted, promoted_end = lesson_section_markers(lines, "PROMOTED_LESSONS")
+    active_end = active_end if active_end is not None else promoted
+    promoted_end = promoted_end if promoted_end is not None else len(lines)
+    validate_global_lesson_uniqueness(
+        b"".join(lines[active + 1:active_end]),
+        b"".join(lines[promoted + 1:promoted_end]),
+    )
 
 
 def set_watermark(document: bytes, target: str) -> bytes:
@@ -1238,6 +1270,9 @@ def write_review(
                 PROMOTED_STANDARD_END,
             )
 
+        # Re-scan the complete authoritative sections immediately before the
+        # final watermark write, not only the sections touched by this update.
+        validate_lessons_document_uniqueness(check_lessons)
         final_lessons = set_watermark(check_lessons, manifest["through"])
         # No file write follows this atomic replacement. On retry where the marker
         # already equals through, this is still the final durable write for the key.

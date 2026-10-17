@@ -187,13 +187,23 @@ class FrozenWriterTests(unittest.TestCase):
                 self.assertFalse((self.repo / ".git" / "frozen-review-writer.lock").exists())
         self.lessons.write_bytes(original)
 
-    def test_crlf_watermark_is_shared_and_archive_root_is_repository_relative(self) -> None:
+    def test_archive_root_is_fixed_and_control_documents_are_rejected(self) -> None:
         self.lessons.write_bytes(self.lessons.read_bytes().replace(b"\n", b"\r\n"))
-        self.run_writer(archive="engineering/reviews/2026-10-16.md")
-        self.assertTrue((self.repo / "engineering/reviews/2026-10-16.md").exists())
+        for archive in (
+            "engineering/reviews/2026-10-16.md",
+            "LESSONS.md",
+            "docs/project-profile.md",
+            "docs/automation/runner-contract.md",
+            "docs/automation/writer-contract.md",
+        ):
+            with self.subTest(archive=archive):
+                with self.assertRaises(WRITER.WriterError):
+                    self.run_writer(archive=archive)
+        self.run_writer(archive="docs/reviews/2026-10-16.md")
+        self.assertTrue((self.repo / "docs/reviews/2026-10-16.md").exists())
 
     def test_archive_traversal_and_symlink_root_are_rejected(self) -> None:
-        with self.assertRaisesRegex(WRITER.WriterError, "parent"):
+        with self.assertRaisesRegex(WRITER.WriterError, "docs/reviews"):
             self.run_writer(archive="../outside/review.md")
         outside = self.root / "outside"
         outside.mkdir()
@@ -201,6 +211,17 @@ class FrozenWriterTests(unittest.TestCase):
         with self.assertRaises(WRITER.WriterError):
             self.run_writer(archive="linked/review.md")
         self.assertFalse((outside / "review.md").exists())
+
+    def test_real_git_lock_contention_is_rejected(self) -> None:
+        lock_dir_fd, lock_fd = WRITER.acquire_writer_lock(WRITER.git_common_dir(self.repo))
+        try:
+            with self.assertRaises(WRITER.WriterError):
+                self.run_writer()
+        finally:
+            import fcntl
+            fcntl.flock(lock_fd, fcntl.LOCK_UN)
+            os.close(lock_fd)
+            os.close(lock_dir_fd)
 
     def seed_active_lesson(self, active_body: str) -> str:
         prior_key = "sha256:" + "d" * 64
@@ -899,11 +920,15 @@ class FrozenWriterTests(unittest.TestCase):
         result = self.run_writer("valid review", "", "docs/reviews/2026-10-16.md")
         self.assertIn(result["range_key"], self.lessons.read_text(encoding="utf-8"))
         self.assertIn("no lesson entries", self.lessons.read_text(encoding="utf-8"))
-        for reserved in ("LESSONS.md", "docs/code-standards.md", "docs/project-profile.md"):
-            with self.assertRaisesRegex(WRITER.WriterError, "reserved state document"):
-                WRITER.validate_relative_archive(reserved)
-        with self.assertRaisesRegex(WRITER.WriterError, "parent"):
-            WRITER.validate_relative_archive("docs/reviews/../LESSONS.md")
+        for invalid in (
+            "LESSONS.md",
+            "docs/code-standards.md",
+            "docs/project-profile.md",
+            "docs/reviews/../LESSONS.md",
+            "engineering/reviews/2026-10-16.md",
+        ):
+            with self.assertRaises(WRITER.WriterError):
+                WRITER.validate_relative_archive(invalid)
 
 
     def _dated_lesson(self, rows: str, why: str = "synthetic regression fixture.") -> str:

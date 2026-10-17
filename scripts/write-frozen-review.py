@@ -36,8 +36,6 @@ PROMOTED_STANDARD_END = re.compile(rb"^<!-- /frozen-review-standard: (sha256:[0-
 RANGE_KEY = re.compile(r"^sha256:[0-9a-f]{64}$")
 OBJECT_ID = re.compile(r"^[0-9a-f]+$")
 LOCK_NAME = "frozen-review-writer.lock"
-# These repository state documents are writer-owned destinations, never archives.
-RESERVED_ARCHIVE_PATHS = {"LESSONS.md", "docs/code-standards.md", "docs/project-profile.md"}
 POLICY_PATH = "docs/automation/range-exclusions.json"
 RULE_ID = re.compile(r"^[a-z0-9][a-z0-9-]*$")
 SHA256_HEX = re.compile(r"^[0-9a-f]{64}$")
@@ -333,13 +331,10 @@ def load_manifest(path: Path) -> dict[str, Any]:
 
 def validate_relative_archive(value: str) -> tuple[str, ...]:
     if not value or value.startswith("/") or "\\" in value or "\x00" in value:
-        raise WriterError("archive path must be a repository-relative Markdown path")
+        raise WriterError("archive path must be a repository-relative docs/reviews Markdown path")
     parts = tuple(value.split("/"))
-    normalized = "/".join(parts)
-    if normalized in RESERVED_ARCHIVE_PATHS:
-        raise WriterError(f"archive path is reserved state document: {normalized}")
-    if len(parts) < 2 or not parts[-1].endswith(".md"):
-        raise WriterError("archive path must be repository-relative and end in .md")
+    if len(parts) < 3 or parts[:2] != ("docs", "reviews") or not parts[-1].endswith(".md"):
+        raise WriterError("archive path must be under docs/reviews/ and end in .md")
     if any(part in ("", ".", "..") for part in parts):
         raise WriterError("archive path must not contain empty, dot, or parent components")
     return parts

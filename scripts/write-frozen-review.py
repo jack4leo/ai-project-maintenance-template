@@ -787,10 +787,17 @@ def update_lessons(
         raise WriterError("LESSONS.md has an invalid ACTIVE_LESSONS section")
     active_section = b"".join(lines[active + 1 : active_section_end])
     promoted_section = b"".join(lines[promoted + 1 : promoted_section_end])
+    active_input_ids = set(lesson_ids_in_content(body, "active Lessons"))
+    existing_promoted_ids = set(lesson_ids_in_content(promoted_section, "existing promoted Lessons"))
+    reintroduced_ids = active_input_ids & existing_promoted_ids
+    if reintroduced_ids:
+        raise WriterError(
+            "active Lessons content would reintroduce already promoted Lesson IDs: "
+            + ", ".join(sorted(reintroduced_ids))
+        )
 
     if promoted_body is not None:
         promoted_ids = set(lesson_ids_in_content(promoted_body, "promoted Lessons", required=True))
-        active_input_ids = set(lesson_ids_in_content(body, "active Lessons"))
         if promoted_ids & active_input_ids:
             raise WriterError("a promoted Lesson must not also be supplied as active content")
 

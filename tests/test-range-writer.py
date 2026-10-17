@@ -325,6 +325,35 @@ class FrozenWriterTests(unittest.TestCase):
         self.assertEqual(standards.count(self.manifest["range_key"]), 2)
         self.assertEqual(PROMOTION_VALIDATOR.validate_documents(lessons, standards), [])
 
+    def test_stale_active_body_retry_without_promotion_inputs_cannot_reintroduce_promoted_id(self) -> None:
+        active_body, promoted_body, standard_body = promotion_fixture()
+        self.seed_active_lesson(active_body)
+        standards_path = self.repo / "docs/code-standards.md"
+        standards_path.parent.mkdir(parents=True)
+        standards_path.write_text(
+            "# Synthetic standards\n<!-- PROMOTED_RULES:START -->\n<!-- PROMOTED_RULES:END -->\n",
+            encoding="utf-8",
+        )
+        self.run_writer(
+            "initial promotion",
+            "",
+            promoted_lesson_body=promoted_body,
+            promoted_standards_body=standard_body,
+        )
+        archive_path = self.repo / "docs/reviews/2026-10-16.md"
+        before = {
+            "archive": archive_path.read_bytes(),
+            "lessons": self.lessons.read_bytes(),
+            "standards": standards_path.read_bytes(),
+        }
+
+        with self.assertRaisesRegex(WRITER.WriterError, "already promoted"):
+            self.run_writer("stale active retry", active_body)
+
+        self.assertEqual(archive_path.read_bytes(), before["archive"])
+        self.assertEqual(self.lessons.read_bytes(), before["lessons"])
+        self.assertEqual(standards_path.read_bytes(), before["standards"])
+
     def test_promotion_inputs_are_paired_and_require_an_existing_active_lesson(self) -> None:
         _active_body, promoted_body, _standard_body = promotion_fixture()
         manifest_path, archive_path, lessons_path = write_inputs(
